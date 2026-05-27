@@ -1013,6 +1013,26 @@ def main() -> None:
         result_row("Popularity", "", pop_recall, pop_ndcg),
     ]
 
+    cf_pop_row, _, _ = evaluate_prepared_model(
+        model="CF + popularity baseline",
+        prepared_cases=prepared_cases,
+        cases=cases,
+        top_k=args.top_k,
+        alpha=0.0,
+        lyrics_weight=0.0,
+        cf_weight=args.cf_weight,
+        mood_weight=0.0,
+        artist_weight=0.0,
+        type_weight=0.0,
+        language_weight=0.0,
+        pop_weight=args.pop_weight,
+    )
+    result_rows.append(cf_pop_row)
+    print(
+        f"  CF+popularity Recall@{args.top_k}: {float(cf_pop_row['recall']):.5f}  "
+        f"NDCG@{args.top_k}: {float(cf_pop_row['ndcg']):.5f}"
+    )
+
     alphas: list[float] = []
     value = 0.0
     while value <= 1.000001:
