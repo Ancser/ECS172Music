@@ -437,15 +437,60 @@ def evaluate_rankings(rankings: dict[str, list[str]], cases: list[EvalCase], k: 
 def print_results_table(rows: list[dict[str, float | str]]) -> None:
     print()
     print("Results table")
-    print("| Model | Retrieval | Recall | NDCG | Proxy |")
-    print("|---|---:|---:|---:|---:|")
+    print(f"{'Model':<28} {'Retrieval':>10} {'Recall':>10} {'NDCG':>10} {'Proxy':>10}")
+    print("-" * 72)
     for row in rows:
         retrieval = row["retrieval"]
         retrieval_text = "-" if retrieval == "" else f"{float(retrieval):.5f}"
         recall = float(row["recall"])
         ndcg = float(row["ndcg"])
         proxy = float(row["proxy"])
-        print(f"| {row['model']} | {retrieval_text} | {recall:.5f} | {ndcg:.5f} | {proxy:.5f} |")
+        print(f"{str(row['model']):<28} {retrieval_text:>10} {recall:>10.5f} {ndcg:>10.5f} {proxy:>10.5f}")
+
+
+def result_row(
+    model: str,
+    retrieval: float | str,
+    recall: float,
+    ndcg: float,
+) -> dict[str, float | str]:
+    return {
+        "model": model,
+        "retrieval": retrieval,
+        "recall": recall,
+        "ndcg": ndcg,
+        "proxy": (recall + ndcg) / 2.0,
+    }
+
+
+def evaluate_prepared_model(
+    model: str,
+    prepared_cases: list[PreparedCase],
+    cases: list[EvalCase],
+    top_k: int,
+    alpha: float,
+    lyrics_weight: float,
+    cf_weight: float,
+    mood_weight: float,
+    artist_weight: float,
+    type_weight: float,
+    language_weight: float,
+    pop_weight: float,
+) -> tuple[dict[str, float | str], dict[str, list[str]], float]:
+    rankings, retrieval = build_content_rankings(
+        k=top_k,
+        prepared_cases=prepared_cases,
+        alpha=alpha,
+        lyrics_weight=lyrics_weight,
+        cf_weight=cf_weight,
+        mood_weight=mood_weight,
+        artist_weight=artist_weight,
+        type_weight=type_weight,
+        language_weight=language_weight,
+        pop_weight=pop_weight,
+    )
+    recall, ndcg = evaluate_rankings(rankings, cases, top_k)
+    return result_row(model, retrieval, recall, ndcg), rankings, retrieval
 
 
 def popularity_counts(cases: list[EvalCase]) -> Counter[str]:
@@ -834,6 +879,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artist-weight", type=float, default=0.10)
     parser.add_argument("--type-weight", type=float, default=0.05)
     parser.add_argument("--language-weight", type=float, default=0.02)
+    parser.add_argument("--no-ablations", action="store_true", help="Skip cheap post-sweep ablation comparisons")
     parser.add_argument("--min-df", type=int, default=2)
     parser.add_argument("--max-features", type=int, default=30000)
     parser.add_argument("--pop-weight", type=float, default=0.10)
@@ -963,20 +1009,8 @@ def main() -> None:
     print(f"  random       Recall@{args.top_k}: {random_recall:.5f}  NDCG@{args.top_k}: {random_ndcg:.5f}")
     print(f"  popularity   Recall@{args.top_k}: {pop_recall:.5f}  NDCG@{args.top_k}: {pop_ndcg:.5f}")
     result_rows: list[dict[str, float | str]] = [
-        {
-            "model": "Random",
-            "retrieval": "",
-            "recall": random_recall,
-            "ndcg": random_ndcg,
-            "proxy": (random_recall + random_ndcg) / 2.0,
-        },
-        {
-            "model": "Popularity",
-            "retrieval": "",
-            "recall": pop_recall,
-            "ndcg": pop_ndcg,
-            "proxy": (pop_recall + pop_ndcg) / 2.0,
-        },
+        result_row("Random", "", random_recall, random_ndcg),
+        result_row("Popularity", "", pop_recall, pop_ndcg),
     ]
 
     alphas: list[float] = []
@@ -1009,15 +1043,7 @@ def main() -> None:
             f"  alpha={alpha:>4.2f}  Retrieval@{args.pool_size}: {retrieval:.5f}  "
             f"Recall@{args.top_k}: {recall:.5f}  NDCG@{args.top_k}: {ndcg:.5f}  Proxy: {proxy:.5f}"
         )
-        result_rows.append(
-            {
-                "model": f"Hybrid alpha={alpha:.2f}",
-                "retrieval": retrieval,
-                "recall": recall,
-                "ndcg": ndcg,
-                "proxy": proxy,
-            }
-        )
+        result_rows.append(result_row(f"Hybrid alpha={alpha:.2f}", retrieval, recall, ndcg))
         candidate = (proxy, recall, ndcg, retrieval, alpha, rankings)
         if best is None or candidate[:4] > best[:4]:
             best = candidate
@@ -1035,15 +1061,33 @@ def main() -> None:
     print(f"  Recall@{args.top_k}:             {recall:.5f}")
     print(f"  NDCG@{args.top_k}:               {ndcg:.5f}")
     print(f"  Proxy:                 {proxy:.5f}")
-    result_rows.append(
-        {
-            "model": f"Best Hybrid alpha={alpha:.2f}",
-            "retrieval": retrieval,
-            "recall": recall,
-            "ndcg": ndcg,
-            "proxy": proxy,
-        }
-    )
+    result_rows.append(result_row(f"Best Hybrid alpha={alpha:.2f}", retrieval, recall, ndcg))
+    if not args.no_ablations:
+        print()
+        print("Ablation comparisons at best alpha")
+        ablations = [
+            ("No CF", args.lyrics_weight, 0.0, args.mood_weight, args.artist_weight, args.type_weight, args.language_weight, args.pop_weight),
+            ("No mood/drift", args.lyrics_weight, args.cf_weight, 0.0, args.artist_weight, args.type_weight, args.language_weight, args.pop_weight),
+            ("No metadata", args.lyrics_weight, args.cf_weight, args.mood_weight, 0.0, 0.0, 0.0, args.pop_weight),
+            ("No lyrics", 0.0, args.cf_weight, args.mood_weight, args.artist_weight, args.type_weight, args.language_weight, args.pop_weight),
+            ("CF + popularity", 0.0, args.cf_weight, 0.0, 0.0, 0.0, 0.0, args.pop_weight),
+        ]
+        for name, lyrics_w, cf_w, mood_w, artist_w, type_w, language_w, pop_w in ablations:
+            row, _, _ = evaluate_prepared_model(
+                model=name,
+                prepared_cases=prepared_cases,
+                cases=cases,
+                top_k=args.top_k,
+                alpha=alpha,
+                lyrics_weight=lyrics_w,
+                cf_weight=cf_w,
+                mood_weight=mood_w,
+                artist_weight=artist_w,
+                type_weight=type_w,
+                language_weight=language_w,
+                pop_weight=pop_w,
+            )
+            result_rows.append(row)
     print_results_table(result_rows)
     print_example_recs(
         cases=cases,
