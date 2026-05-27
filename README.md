@@ -23,7 +23,7 @@ Current implementation intentionally starts simpler:
 
 ```text
 No LLM yet.
-Use lyrics TF-IDF/content-IDF first.
+Use lyrics TF-IDF/content-IDF, co-occurrence CF, metadata, and weak lyric-emotion rules first.
 Measure baselines before adding emotion tags or learned models.
 ```
 
@@ -102,6 +102,8 @@ Join playlist tracks to lyrics by (artist_name, track_name).
 Keep matched tracks for the lyrics-first prototype.
 ```
 
+MPD does not provide per-song `date_added`. It provides playlist-level `modified_at` and track-level `pos`, so the prototype uses `pos` as the old-to-new playlist order.
+
 Data review must print:
 
 ```text
@@ -169,6 +171,25 @@ Stage 2: Recall@10, NDCG@10, Proxy
 
 Stage 1 should retrieve a broad candidate pool. It is optimized for recall, not final ordering.
 
+### Stage 0: Song Classification
+
+Current no-LLM song features:
+
+```text
+language = simple lyric language heuristic
+lyric type = rule-based lyric topic/emotion bucket
+valence/arousal = weak emotion vector from lyric lexicon
+artist = metadata from MPD/lyrics
+```
+
+Lyric type buckets:
+
+```text
+love, sadness, energy, anger, calm, hope, nostalgia, other
+```
+
+These are placeholders for later LLM emotion tags.
+
 ### Route A: Lyrics TF-IDF
 
 Current implemented no-LLM route.
@@ -228,7 +249,7 @@ progress prints every --progress-interval eval playlists
 
 ### Route B: Co-Occurrence CF
 
-Next baseline to add.
+Implemented long-term preference route.
 
 Algorithm:
 
@@ -271,7 +292,7 @@ baseline comparison
 
 ### Stage 1 Fusion
 
-Later combine retrieval routes:
+Current candidate pool combines:
 
 ```text
 stage1_score =
@@ -302,8 +323,12 @@ Current prototype ranker:
 
 ```text
 final_score =
-  alpha * lyrics_long_norm
-+ (1 - alpha) * lyrics_short_norm
+  lyrics_weight * (alpha * lyrics_long_norm + (1-alpha) * lyrics_short_norm)
++ cf_weight * cf_score_norm
++ mood_weight * mood_drift_score_norm
++ artist_weight * same_artist_score_norm
++ type_weight * lyric_type_score_norm
++ language_weight * language_score_norm
 + pop_weight * popularity_norm
 ```
 
@@ -313,7 +338,7 @@ Grid search:
 alpha = 0.0, 0.1, ..., 1.0
 ```
 
-Future Stage 2 features:
+Current Stage 2 features:
 
 ```text
 lyrics_long_norm
@@ -321,10 +346,10 @@ lyrics_short_norm
 lyrics_delta
 cf_score_norm
 track_popularity_norm
-artist_popularity_norm
 same_artist_count
-playlist_length
-observed_unique_artists
+lyric_type_overlap
+language_match
+mood_drift_score
 ```
 
 Do not assume a learned classifier is better. Logistic regression or MLP should only be added after manual fusion baselines are measured, and must be validated by Recall@10/NDCG@10 rather than accuracy.

@@ -31,6 +31,45 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = ROOT / "data"
 DEFAULT_LYRICS_CSV = DEFAULT_DATA_DIR / "spotify_millsongdata.csv"
 
+EMOTION_LEXICON = {
+    "love": {
+        "love", "baby", "heart", "kiss", "hold", "touch", "darling", "sweet", "together", "forever",
+        "lover", "romance", "beautiful",
+    },
+    "sadness": {
+        "cry", "tears", "lonely", "alone", "sad", "pain", "hurt", "broken", "goodbye", "miss",
+        "lost", "blue", "empty", "sorrow",
+    },
+    "energy": {
+        "dance", "party", "night", "fire", "rock", "jump", "move", "beat", "club", "run",
+        "wild", "loud", "alive",
+    },
+    "anger": {
+        "hate", "fight", "kill", "rage", "mad", "war", "enemy", "burn", "scream", "angry",
+    },
+    "calm": {
+        "sleep", "dream", "quiet", "soft", "slow", "peace", "breathe", "gentle", "moon", "rain",
+        "river", "home",
+    },
+    "hope": {
+        "hope", "rise", "sun", "light", "free", "fly", "believe", "better", "tomorrow", "shine",
+    },
+    "nostalgia": {
+        "remember", "memory", "yesterday", "old", "again", "back", "days", "child", "home",
+    },
+}
+
+EMOTION_VECTOR = {
+    "love": (0.70, 0.45),
+    "sadness": (-0.70, 0.25),
+    "energy": (0.45, 0.90),
+    "anger": (-0.55, 0.85),
+    "calm": (0.20, 0.15),
+    "hope": (0.65, 0.55),
+    "nostalgia": (0.15, 0.30),
+    "other": (0.0, 0.5),
+}
+
 
 @dataclass(frozen=True)
 class Song:
@@ -54,9 +93,22 @@ class PreparedCase:
     candidates: set[str]
     long_norm: dict[str, float]
     short_norm: dict[str, float]
+    cf_norm: dict[str, float]
+    artist_norm: dict[str, float]
+    type_norm: dict[str, float]
+    language_norm: dict[str, float]
+    mood_norm: dict[str, float]
     pop_norm: dict[str, float]
     retrieval: float
     cold_start: bool
+
+
+@dataclass(frozen=True)
+class SongFeature:
+    language: str
+    primary_type: str
+    valence: float
+    arousal: float
 
 
 def normalize_text(value: str) -> str:
@@ -72,6 +124,57 @@ def song_key(title: str, artist: str) -> str:
 
 def tokenize(text: str) -> list[str]:
     return TOKEN_RE.findall((text or "").lower())
+
+
+def cosine2(a: tuple[float, float], b: tuple[float, float]) -> float:
+    dot = a[0] * b[0] + a[1] * b[1]
+    na = math.sqrt(a[0] * a[0] + a[1] * a[1])
+    nb = math.sqrt(b[0] * b[0] + b[1] * b[1])
+    if not na or not nb:
+        return 0.0
+    return dot / (na * nb)
+
+
+def detect_language(tokens: list[str], raw_text: str) -> str:
+    if not raw_text:
+        return "unknown"
+    ascii_chars = sum(1 for char in raw_text if ord(char) < 128)
+    ascii_ratio = ascii_chars / max(1, len(raw_text))
+    common_english = {"the", "and", "you", "me", "i", "to", "my", "a", "in", "it", "of"}
+    english_hits = sum(1 for token in tokens[:300] if token in common_english)
+    if ascii_ratio > 0.95 and english_hits >= 3:
+        return "english"
+    if ascii_ratio > 0.90:
+        return "mostly_english"
+    return "non_english"
+
+
+def build_song_features(songs: dict[str, Song]) -> dict[str, SongFeature]:
+    features: dict[str, SongFeature] = {}
+    for song_id, song in songs.items():
+        tokens = tokenize(song.lyrics)
+        token_counts = Counter(tokens)
+        scores: dict[str, float] = {}
+        for emotion, terms in EMOTION_LEXICON.items():
+            scores[emotion] = sum(token_counts.get(term, 0) for term in terms)
+        primary = max(scores, key=lambda key: (scores[key], key)) if scores else "other"
+        if scores.get(primary, 0.0) <= 0:
+            primary = "other"
+
+        total = sum(scores.values())
+        if total:
+            valence = sum(scores[key] * EMOTION_VECTOR[key][0] for key in scores) / total
+            arousal = sum(scores[key] * EMOTION_VECTOR[key][1] for key in scores) / total
+        else:
+            valence, arousal = EMOTION_VECTOR["other"]
+
+        features[song_id] = SongFeature(
+            language=detect_language(tokens, song.lyrics),
+            primary_type=primary,
+            valence=valence,
+            arousal=arousal,
+        )
+    return features
 
 
 def find_column(fieldnames: list[str], options: list[str]) -> str:
@@ -352,6 +455,94 @@ def popularity_counts(cases: list[EvalCase]) -> Counter[str]:
     return counts
 
 
+def build_cf_neighbors(cases: list[EvalCase], max_neighbors: int) -> dict[str, list[tuple[str, float]]]:
+    popularity = popularity_counts(cases)
+    co_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    for case in cases:
+        observed = list(dict.fromkeys(case.observed))
+        for i, left in enumerate(observed):
+            for right in observed[i + 1 :]:
+                co_counts[left][right] += 1
+                co_counts[right][left] += 1
+
+    neighbors: dict[str, list[tuple[str, float]]] = {}
+    for song_id, counts in co_counts.items():
+        scored = []
+        for other_id, count in counts.items():
+            denom = math.sqrt(popularity[song_id] * popularity[other_id]) or 1.0
+            scored.append((other_id, count / denom))
+        scored.sort(key=lambda item: (-item[1], item[0]))
+        neighbors[song_id] = scored[:max_neighbors]
+    return neighbors
+
+
+def score_cf(observed: list[str], cf_neighbors: dict[str, list[tuple[str, float]]], exclude: set[str], top_k: int) -> dict[str, float]:
+    scores: Counter[str] = Counter()
+    for song_id in observed:
+        for candidate, weight in cf_neighbors.get(song_id, []):
+            if candidate not in exclude:
+                scores[candidate] += weight
+    return dict(scores.most_common(top_k))
+
+
+def average_mood(song_ids: list[str], features: dict[str, SongFeature], decay: float = 1.0) -> tuple[float, float]:
+    total_weight = 0.0
+    valence = 0.0
+    arousal = 0.0
+    n_songs = len(song_ids)
+    for pos, song_id in enumerate(song_ids):
+        feature = features.get(song_id)
+        if not feature:
+            continue
+        weight = decay ** (n_songs - pos - 1) if decay < 1.0 else 1.0
+        total_weight += weight
+        valence += feature.valence * weight
+        arousal += feature.arousal * weight
+    if not total_weight:
+        return EMOTION_VECTOR["other"]
+    return valence / total_weight, arousal / total_weight
+
+
+def score_metadata_and_mood(
+    observed: list[str],
+    candidates: set[str],
+    songs: dict[str, Song],
+    features: dict[str, SongFeature],
+    short_window: int,
+    time_decay: float,
+    mood_drift_beta: float,
+) -> tuple[dict[str, float], dict[str, float], dict[str, float], dict[str, float]]:
+    observed_artists = Counter(songs[song_id].artist for song_id in observed if song_id in songs)
+    observed_types = Counter(features[song_id].primary_type for song_id in observed if song_id in features)
+    observed_languages = Counter(features[song_id].language for song_id in observed if song_id in features)
+
+    first_half = observed[: max(1, len(observed) // 2)]
+    second_half = observed[max(1, len(observed) // 2) :]
+    recent = average_mood(observed[-short_window:], features, decay=time_decay)
+    first_mood = average_mood(first_half, features, decay=time_decay)
+    second_mood = average_mood(second_half, features, decay=time_decay)
+    projected_mood = (
+        recent[0] + mood_drift_beta * (second_mood[0] - first_mood[0]),
+        recent[1] + mood_drift_beta * (second_mood[1] - first_mood[1]),
+    )
+
+    artist_scores: dict[str, float] = {}
+    type_scores: dict[str, float] = {}
+    language_scores: dict[str, float] = {}
+    mood_scores: dict[str, float] = {}
+    for candidate in candidates:
+        song = songs.get(candidate)
+        feature = features.get(candidate)
+        if not song or not feature:
+            continue
+        artist_scores[candidate] = float(observed_artists.get(song.artist, 0))
+        type_scores[candidate] = float(observed_types.get(feature.primary_type, 0))
+        language_scores[candidate] = float(observed_languages.get(feature.language, 0))
+        mood_scores[candidate] = cosine2((feature.valence, feature.arousal), projected_mood)
+
+    return artist_scores, type_scores, language_scores, mood_scores
+
+
 def rank_popularity(case: EvalCase, popularity: Counter[str], catalog: set[str], k: int) -> list[str]:
     exclude = set(case.observed)
     candidates = [song_id for song_id in catalog if song_id not in exclude]
@@ -367,11 +558,15 @@ def rank_random(case: EvalCase, catalog: set[str], k: int, rng: random.Random) -
 
 def prepare_content_cases(
     cases: list[EvalCase],
+    songs: dict[str, Song],
+    features: dict[str, SongFeature],
     index: TfidfIndex,
+    cf_neighbors: dict[str, list[tuple[str, float]]],
     popularity: Counter[str],
     pool_size: int,
     short_window: int,
     time_decay: float,
+    mood_drift_beta: float,
     cold_start_threshold: int,
     progress_interval: int,
 ) -> list[PreparedCase]:
@@ -390,18 +585,35 @@ def prepare_content_cases(
             candidates = {song_id for song_id in top_popular if song_id not in exclude}
             long_norm: dict[str, float] = {}
             short_norm: dict[str, float] = {}
+            cf_norm: dict[str, float] = {}
         else:
             long_profile = index.profile(case.observed, decay=time_decay)
             short_profile = index.profile(case.observed[-short_window:], decay=time_decay)
             long_scores = index.score_profile(long_profile, exclude, pool_size)
             short_scores = index.score_profile(short_profile, exclude, pool_size)
+            cf_scores = score_cf(case.observed, cf_neighbors, exclude, pool_size)
             candidates = set(long_scores) | set(short_scores)
+            candidates.update(cf_scores)
             candidates.update(song_id for song_id in top_popular if song_id not in exclude)
             long_norm = normalize_scores(long_scores, candidates)
             short_norm = normalize_scores(short_scores, candidates)
+            cf_norm = normalize_scores(cf_scores, candidates)
 
+        artist_scores, type_scores, language_scores, mood_scores = score_metadata_and_mood(
+            observed=case.observed,
+            candidates=candidates,
+            songs=songs,
+            features=features,
+            short_window=short_window,
+            time_decay=time_decay,
+            mood_drift_beta=mood_drift_beta,
+        )
         pop_raw = {song_id: float(popularity.get(song_id, 0)) for song_id in candidates}
         pop_norm = normalize_scores(pop_raw, candidates)
+        artist_norm = normalize_scores(artist_scores, candidates)
+        type_norm = normalize_scores(type_scores, candidates)
+        language_norm = normalize_scores(language_scores, candidates)
+        mood_norm = normalize_scores(mood_scores, candidates)
         retrieval = recall_at_k(list(candidates), set(case.heldout), len(candidates))
         prepared.append(
             PreparedCase(
@@ -410,6 +622,11 @@ def prepare_content_cases(
                 candidates=candidates,
                 long_norm=long_norm,
                 short_norm=short_norm,
+                cf_norm=cf_norm,
+                artist_norm=artist_norm,
+                type_norm=type_norm,
+                language_norm=language_norm,
+                mood_norm=mood_norm,
                 pop_norm=pop_norm,
                 retrieval=retrieval,
                 cold_start=cold_start,
@@ -432,6 +649,12 @@ def build_content_rankings(
     prepared_cases: list[PreparedCase],
     k: int,
     alpha: float,
+    lyrics_weight: float,
+    cf_weight: float,
+    mood_weight: float,
+    artist_weight: float,
+    type_weight: float,
+    language_weight: float,
     pop_weight: float,
 ) -> tuple[dict[str, list[str]], float]:
     rankings: dict[str, list[str]] = {}
@@ -440,8 +663,13 @@ def build_content_rankings(
     for case in prepared_cases:
         retrieval_recalls.append(case.retrieval)
         final_scores = {
-            song_id: alpha * case.long_norm.get(song_id, 0.0)
-            + (1.0 - alpha) * case.short_norm.get(song_id, 0.0)
+            song_id: lyrics_weight
+            * (alpha * case.long_norm.get(song_id, 0.0) + (1.0 - alpha) * case.short_norm.get(song_id, 0.0))
+            + cf_weight * case.cf_norm.get(song_id, 0.0)
+            + mood_weight * case.mood_norm.get(song_id, 0.0)
+            + artist_weight * case.artist_norm.get(song_id, 0.0)
+            + type_weight * case.type_norm.get(song_id, 0.0)
+            + language_weight * case.language_norm.get(song_id, 0.0)
             + pop_weight * case.pop_norm.get(song_id, 0.0)
             for song_id in case.candidates
         }
@@ -537,24 +765,49 @@ def print_all_data_stats(songs: dict[str, Song], playlists: list[tuple[str, list
         print(f"  max lyric tokens:        {max(lyric_token_counts)}")
 
 
-def print_example_recs(cases: list[EvalCase], rankings: dict[str, list[str]], songs: dict[str, Song], limit: int) -> None:
+def describe_song(song_id: str, songs: dict[str, Song], features: dict[str, SongFeature]) -> str:
+    song = songs[song_id]
+    feature = features.get(song_id)
+    if not feature:
+        return f"{song.title} / {song.artist}"
+    return (
+        f"{song.title} / {song.artist} "
+        f"[type={feature.primary_type}, lang={feature.language}, mood=({feature.valence:.2f},{feature.arousal:.2f})]"
+    )
+
+
+def print_example_recs(
+    cases: list[EvalCase],
+    rankings: dict[str, list[str]],
+    songs: dict[str, Song],
+    features: dict[str, SongFeature],
+    limit: int,
+    short_window: int,
+    time_decay: float,
+) -> None:
     if not cases:
         return
     case = cases[0]
+    first_mood = average_mood(case.observed[: max(1, len(case.observed) // 2)], features, decay=time_decay)
+    recent_mood = average_mood(case.observed[-short_window:], features, decay=time_decay)
+    heldout_mood = average_mood(case.heldout, features, decay=time_decay)
     print()
     print(f"Example recommendations for playlist {case.playlist_id}")
+    print(
+        "  mood path: "
+        f"early=({first_mood[0]:.2f},{first_mood[1]:.2f}) -> "
+        f"recent=({recent_mood[0]:.2f},{recent_mood[1]:.2f}) -> "
+        f"heldout=({heldout_mood[0]:.2f},{heldout_mood[1]:.2f})"
+    )
     print("  input:")
     for song_id in case.observed[:limit]:
-        song = songs[song_id]
-        print(f"    - {song.title} / {song.artist}")
+        print(f"    - {describe_song(song_id, songs, features)}")
     print("  heldout:")
     for song_id in case.heldout[:limit]:
-        song = songs[song_id]
-        print(f"    - {song.title} / {song.artist}")
+        print(f"    - {describe_song(song_id, songs, features)}")
     print("  recommended:")
     for song_id in rankings.get(case.playlist_id, [])[:limit]:
-        song = songs[song_id]
-        print(f"    - {song.title} / {song.artist}")
+        print(f"    - {describe_song(song_id, songs, features)}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -571,11 +824,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--short-window", type=int, default=5)
     parser.add_argument("--time-decay", type=float, default=0.9, help="Older observed songs get decay^(distance from newest)")
+    parser.add_argument("--mood-drift-beta", type=float, default=0.5, help="Extrapolate recent mood by beta * mood drift")
     parser.add_argument("--cold-start-threshold", type=int, default=1, help="Use popularity-only ranking when observed history has this many songs or fewer")
     parser.add_argument("--progress-interval", type=int, default=1000, help="Print candidate-prep progress every N eval playlists")
+    parser.add_argument("--cf-neighbors", type=int, default=100, help="Keep top N co-occurrence neighbors per song")
+    parser.add_argument("--lyrics-weight", type=float, default=0.25)
+    parser.add_argument("--cf-weight", type=float, default=0.35)
+    parser.add_argument("--mood-weight", type=float, default=0.15)
+    parser.add_argument("--artist-weight", type=float, default=0.10)
+    parser.add_argument("--type-weight", type=float, default=0.05)
+    parser.add_argument("--language-weight", type=float, default=0.02)
     parser.add_argument("--min-df", type=int, default=2)
     parser.add_argument("--max-features", type=int, default=30000)
-    parser.add_argument("--pop-weight", type=float, default=0.05)
+    parser.add_argument("--pop-weight", type=float, default=0.10)
     parser.add_argument("--alpha-grid-step", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=172)
     return parser.parse_args()
@@ -656,6 +917,19 @@ def main() -> None:
 
     print_dataset_study(songs, playlists, cases)
     print()
+    print("Building song feature table...")
+    features = build_song_features(songs)
+    type_counts = Counter(feature.primary_type for feature in features.values())
+    language_counts = Counter(feature.language for feature in features.values())
+    print("  top lyric types:         " + ", ".join(f"{k}={v:,}" for k, v in type_counts.most_common(5)))
+    print("  languages:               " + ", ".join(f"{k}={v:,}" for k, v in language_counts.most_common(5)))
+    print()
+    print("Building co-occurrence CF neighbors...")
+    cf_neighbors = build_cf_neighbors(cases, args.cf_neighbors)
+    neighbor_edges = sum(len(items) for items in cf_neighbors.values())
+    print(f"  songs with neighbors:    {len(cf_neighbors):,}")
+    print(f"  stored neighbor edges:   {neighbor_edges:,}")
+    print()
     print("Building lyrics TF-IDF/content-IDF index...")
     index = TfidfIndex(songs, args.min_df, args.max_features)
     print(f"  vocab size:              {len(index.vocab):,}")
@@ -663,11 +937,15 @@ def main() -> None:
 
     prepared_cases = prepare_content_cases(
         cases=cases,
+        songs=songs,
+        features=features,
         index=index,
+        cf_neighbors=cf_neighbors,
         popularity=popularity,
         pool_size=args.pool_size,
         short_window=args.short_window,
         time_decay=args.time_decay,
+        mood_drift_beta=args.mood_drift_beta,
         cold_start_threshold=args.cold_start_threshold,
         progress_interval=args.progress_interval,
     )
@@ -711,12 +989,18 @@ def main() -> None:
 
     best = None
     print()
-    print("Lyrics TF-IDF fusion sweep")
+    print("Hybrid fusion sweep")
     for alpha in alphas:
         rankings, retrieval = build_content_rankings(
             k=args.top_k,
             prepared_cases=prepared_cases,
             alpha=alpha,
+            lyrics_weight=args.lyrics_weight,
+            cf_weight=args.cf_weight,
+            mood_weight=args.mood_weight,
+            artist_weight=args.artist_weight,
+            type_weight=args.type_weight,
+            language_weight=args.language_weight,
             pop_weight=args.pop_weight,
         )
         recall, ndcg = evaluate_rankings(rankings, cases, args.top_k)
@@ -727,7 +1011,7 @@ def main() -> None:
         )
         result_rows.append(
             {
-                "model": f"TF-IDF alpha={alpha:.2f}",
+                "model": f"Hybrid alpha={alpha:.2f}",
                 "retrieval": retrieval,
                 "recall": recall,
                 "ndcg": ndcg,
@@ -742,18 +1026,18 @@ def main() -> None:
     proxy, recall, ndcg, retrieval, alpha, rankings = best
     print()
     print("Best prototype result")
-    print(f"  method:                 lyrics_tfidf_long_short_fusion")
+    print(f"  method:                 hybrid_cf_metadata_mood_tfidf")
     print(f"  alpha long-term:        {alpha:.2f}")
     print(f"  alpha short-term:       {1.0 - alpha:.2f}")
     print(f"  time decay:             {args.time_decay:.2f}")
-    print(f"  popularity tie weight:  {args.pop_weight:.2f}")
+    print(f"  weights:                lyrics={args.lyrics_weight:.2f}, cf={args.cf_weight:.2f}, mood={args.mood_weight:.2f}, artist={args.artist_weight:.2f}, type={args.type_weight:.2f}, language={args.language_weight:.2f}, pop={args.pop_weight:.2f}")
     print(f"  Retrieval@{args.pool_size}:          {retrieval:.5f}")
     print(f"  Recall@{args.top_k}:             {recall:.5f}")
     print(f"  NDCG@{args.top_k}:               {ndcg:.5f}")
     print(f"  Proxy:                 {proxy:.5f}")
     result_rows.append(
         {
-            "model": f"Best TF-IDF alpha={alpha:.2f}",
+            "model": f"Best Hybrid alpha={alpha:.2f}",
             "retrieval": retrieval,
             "recall": recall,
             "ndcg": ndcg,
@@ -761,7 +1045,15 @@ def main() -> None:
         }
     )
     print_results_table(result_rows)
-    print_example_recs(cases, rankings, songs, limit=5)
+    print_example_recs(
+        cases=cases,
+        rankings=rankings,
+        songs=songs,
+        features=features,
+        limit=5,
+        short_window=args.short_window,
+        time_decay=args.time_decay,
+    )
 
 
 if __name__ == "__main__":

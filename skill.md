@@ -134,6 +134,8 @@ lyrics coverage = matched playlist tracks / raw playlist tracks
 playlist retention = playlists after filtering / raw playlists
 ```
 
+MPD does not provide per-song `date_added`. It provides playlist-level `modified_at` and track-level `pos`, so use `pos` as the old-to-new order inside each playlist.
+
 ### 2.3 Filtering
 
 Filter for meaningful evaluation:
@@ -283,7 +285,26 @@ Definition:
 Retrieval@300 = heldout songs appearing anywhere in candidate pool / heldout songs
 ```
 
-### 4.2 Route A: Lyrics TF-IDF Retrieval
+### 4.2 Stage 0: Song Classification
+
+Current no-LLM song features:
+
+```text
+language = simple lyric language heuristic
+lyric type = rule-based topic/emotion bucket
+valence/arousal = weak emotion vector from lyric lexicon
+artist = metadata from MPD/lyrics
+```
+
+Lyric type buckets:
+
+```text
+love, sadness, energy, anger, calm, hope, nostalgia, other
+```
+
+These are placeholders for future LLM-generated emotion tags.
+
+### 4.3 Route A: Lyrics TF-IDF Retrieval
 
 Current no-LLM prototype route.
 
@@ -349,7 +370,7 @@ short_window N
 candidate pool size
 ```
 
-### 4.3 Route B: Co-Occurrence Collaborative Filtering
+### 4.4 Route B: Co-Occurrence Collaborative Filtering
 
 Playlist co-occurrence route.
 
@@ -392,7 +413,7 @@ max neighbors per song
 candidate pool size
 ```
 
-### 4.4 Route C: Popularity Retrieval
+### 4.5 Route C: Popularity Retrieval
 
 Popularity is a serious baseline, not only a fallback.
 
@@ -419,7 +440,7 @@ High Recall@10 from popularity may indicate dataset popularity bias.
 Check catalog coverage and artist diversity.
 ```
 
-### 4.5 Route D: Future LLM Emotion Retrieval
+### 4.6 Route D: Future LLM Emotion Retrieval
 
 Do not use this until TF-IDF and CF baselines are measured.
 
@@ -443,7 +464,7 @@ score_emotion(candidate) = cosine(candidate_emotion_vector, recent_mood)
 
 This replaces or augments the current short-term lyrics TF-IDF route.
 
-### 4.6 Stage 1 Fusion
+### 4.7 Stage 1 Fusion
 
 Merge retrieval routes with normalized scores:
 
@@ -522,12 +543,20 @@ artist_popularity_norm:
   normalized playlist-count popularity of candidate artist
 ```
 
-Playlist context features:
+Metadata / weak emotion features:
 
 ```text
-playlist_length
-observed_unique_artists
-short_window_artist_repeat
+artist_overlap_norm:
+  candidate artist count in observed playlist
+
+type_overlap_norm:
+  candidate lyric type count in observed playlist
+
+language_match_norm:
+  candidate lyric language count in observed playlist
+
+mood_drift_score_norm:
+  similarity to recent_mood + beta * drift_vector
 ```
 
 Future emotion features:
@@ -549,11 +578,13 @@ Use a weighted ranker before learned models:
 
 ```text
 final_score =
-  a * lyrics_long_norm
-+ b * lyrics_short_norm
-+ c * cf_score_norm
-+ d * track_popularity_norm
-+ e * artist_overlap_norm
+  lyrics_weight * (alpha * lyrics_long_norm + (1-alpha) * lyrics_short_norm)
++ cf_weight * cf_score_norm
++ mood_weight * mood_drift_score_norm
++ artist_weight * artist_overlap_norm
++ type_weight * type_overlap_norm
++ language_weight * language_match_norm
++ pop_weight * popularity_norm
 ```
 
 Grid search:
