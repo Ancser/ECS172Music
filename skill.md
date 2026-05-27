@@ -32,7 +32,7 @@ After data exists, run the real data review / prototype:
 
 ```powershell
 pushd <project-folder>
-python .\newSpotify.py --mpd-path .\data --lyrics-csv .\data\spotify_millsongdata.csv
+python .\newSpotify.py --mpd-path .\data --lyrics-csv .\data\spotify_millsongdata.csv --holdout-k 10 --min-playlist-len 2 --time-decay 0.9 --progress-interval 1000
 ```
 
 For a quick no-data demo:
@@ -51,8 +51,8 @@ This skill defines the working algorithm structure for the ECS172 music recommen
 The project goal is playlist continuation:
 
 ```text
-Input:  first 80% of a playlist
-Target: last 20% of the same playlist
+Input:  all earlier songs in a playlist
+Target: up to final 10 songs of the same playlist
 Output: top-10 recommended songs
 Metric: Recall@10 and NDCG@10
 ```
@@ -139,8 +139,10 @@ playlist retention = playlists after filtering / raw playlists
 Filter for meaningful evaluation:
 
 ```text
-playlist length after lyrics join >= 10
-at least 1 held-out song after 80/20 split
+playlist length after lyrics join >= 2
+one observed song is valid
+heldout songs = final songs, up to 10
+if observed length <= cold_start_threshold, use popularity-only cold start
 deduplicate repeated tracks within a playlist before splitting
 ```
 
@@ -191,17 +193,21 @@ Short playlists make short-term mood estimates unstable.
 
 ### 3.1 Split
 
-Use playlist-order holdout:
+Use fixed last-10 playlist-order holdout:
 
 ```text
 For each playlist:
-  observed = first 80%
-  heldout  = last 20%
+  heldout  = playlist[-min(10, len(playlist)-1):]
+  observed = all songs before heldout
 ```
 
-This matches the proposal and tests playlist continuation.
+This directly tests the top-10 playlist continuation task:
 
-Do not randomly split tracks inside a playlist unless running a separate ablation, because random split leaks future playlist context into training.
+```text
+Given previous songs, recommend the next/final songs, up to 10.
+```
+
+Do not randomly split tracks inside a playlist, because random split leaks future playlist context into training.
 
 ### 3.2 Ground Truth
 
@@ -297,15 +303,41 @@ Algorithm:
 Long-term profile:
 
 ```text
-profile_long = average TF-IDF vector of all observed songs
+profile_long = time-decayed average TF-IDF vector of all observed songs
 score_long(candidate) = cosine(profile_long, candidate_vector)
 ```
 
 Short-term profile:
 
 ```text
-profile_short = average TF-IDF vector of last N observed songs
+profile_short = time-decayed average TF-IDF vector of last N observed songs
 score_short(candidate) = cosine(profile_short, candidate_vector)
+```
+
+Time decay:
+
+```text
+newest observed song weight = 1.0
+one song older = time_decay
+two songs older = time_decay^2
+default time_decay = 0.90
+```
+
+Cold-start shortcut:
+
+```text
+if observed length <= cold_start_threshold:
+  skip TF-IDF profile scoring
+  rank with popularity fallback
+default cold_start_threshold = 1
+```
+
+Runtime acceleration:
+
+```text
+prepare candidate scores once
+print progress every --progress-interval eval playlists
+reuse cached long/short/popularity scores for every alpha
 ```
 
 Tune:
@@ -729,7 +761,7 @@ Real MPD run after placing playlist slices in `data/`:
 
 ```powershell
 pushd <project-folder>
-python .\newSpotify.py --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 50000 --min-playlist-len 10 --pool-size 300
+python .\newSpotify.py --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 50000 --min-playlist-len 2 --holdout-k 10 --pool-size 300 --time-decay 0.9 --progress-interval 1000
 ```
 
 ## 9. Final Lesson
@@ -754,6 +786,7 @@ Stage 1 finds enough plausible songs
 Stage 2 orders the best 10
 validation proves whether the change helped
 ```
+
 
 
 

@@ -4,7 +4,7 @@
 This is the first implementation slice for the ECS172 music project:
 - no LLM calls
 - lyrics are represented with TF-IDF/content-IDF vectors
-- each playlist is split first 80% input / last 20% held out
+- each playlist uses earlier songs as input and the last 10 songs as heldout truth
 - recommendations are evaluated with Recall@10 and NDCG@10
 
 The script runs a tiny built-in demo when no dataset paths are supplied.
@@ -19,6 +19,7 @@ import json
 import math
 import random
 import re
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,8 +43,20 @@ class Song:
 @dataclass(frozen=True)
 class EvalCase:
     playlist_id: str
-    train: list[str]
+    observed: list[str]
     heldout: list[str]
+
+
+@dataclass(frozen=True)
+class PreparedCase:
+    playlist_id: str
+    heldout: list[str]
+    candidates: set[str]
+    long_norm: dict[str, float]
+    short_norm: dict[str, float]
+    pop_norm: dict[str, float]
+    retrieval: float
+    cold_start: bool
 
 
 def normalize_text(value: str) -> str:
@@ -196,18 +209,16 @@ def make_demo_data() -> tuple[dict[str, Song], list[tuple[str, list[str]]]]:
     return songs, playlists
 
 
-def split_playlists(playlists: list[tuple[str, list[str]]], min_len: int) -> list[EvalCase]:
+def split_playlists(playlists: list[tuple[str, list[str]]], min_len: int, holdout_k: int) -> list[EvalCase]:
     cases: list[EvalCase] = []
     for pid, tracks in playlists:
         deduped = list(dict.fromkeys(tracks))
-        if len(deduped) < min_len:
+        if len(deduped) < min_len or len(deduped) < 2:
             continue
-        split_at = max(1, int(len(deduped) * 0.8))
-        if split_at >= len(deduped):
-            split_at = len(deduped) - 1
-        train, heldout = deduped[:split_at], deduped[split_at:]
-        if train and heldout:
-            cases.append(EvalCase(pid, train, heldout))
+        case_holdout_k = min(holdout_k, len(deduped) - 1)
+        observed, heldout = deduped[:-case_holdout_k], deduped[-case_holdout_k:]
+        if observed and heldout:
+            cases.append(EvalCase(pid, observed, heldout))
     return cases
 
 
@@ -252,19 +263,21 @@ class TfidfIndex:
             for idx, weight in vec.items():
                 self.inverted[idx].append((song_id, weight))
 
-    def profile(self, song_ids: list[str]) -> dict[int, float]:
+    def profile(self, song_ids: list[str], decay: float = 1.0) -> dict[int, float]:
         weights: Counter[int] = Counter()
-        used = 0
-        for song_id in song_ids:
+        total_weight = 0.0
+        n_songs = len(song_ids)
+        for pos, song_id in enumerate(song_ids):
             vec = self.item_vectors.get(song_id)
             if not vec:
                 continue
-            used += 1
+            sequence_weight = decay ** (n_songs - pos - 1) if decay < 1.0 else 1.0
+            total_weight += sequence_weight
             for idx, weight in vec.items():
-                weights[idx] += weight
-        if not used:
+                weights[idx] += weight * sequence_weight
+        if not total_weight:
             return {}
-        raw = {idx: weight / used for idx, weight in weights.items()}
+        raw = {idx: weight / total_weight for idx, weight in weights.items()}
         norm = math.sqrt(sum(weight * weight for weight in raw.values())) or 1.0
         return {idx: weight / norm for idx, weight in raw.items()}
 
@@ -321,58 +334,102 @@ def evaluate_rankings(rankings: dict[str, list[str]], cases: list[EvalCase], k: 
 def popularity_counts(cases: list[EvalCase]) -> Counter[str]:
     counts: Counter[str] = Counter()
     for case in cases:
-        counts.update(case.train)
+        counts.update(case.observed)
     return counts
 
 
 def rank_popularity(case: EvalCase, popularity: Counter[str], catalog: set[str], k: int) -> list[str]:
-    exclude = set(case.train)
+    exclude = set(case.observed)
     candidates = [song_id for song_id in catalog if song_id not in exclude]
     candidates.sort(key=lambda song_id: (-popularity.get(song_id, 0), song_id))
     return candidates[:k]
 
 
 def rank_random(case: EvalCase, catalog: set[str], k: int, rng: random.Random) -> list[str]:
-    candidates = sorted(song_id for song_id in catalog if song_id not in set(case.train))
+    candidates = sorted(song_id for song_id in catalog if song_id not in set(case.observed))
     rng.shuffle(candidates)
     return candidates[:k]
 
 
-def build_content_rankings(
+def prepare_content_cases(
     cases: list[EvalCase],
     index: TfidfIndex,
     popularity: Counter[str],
     pool_size: int,
-    k: int,
     short_window: int,
+    time_decay: float,
+    cold_start_threshold: int,
+    progress_interval: int,
+) -> list[PreparedCase]:
+    prepared: list[PreparedCase] = []
+    top_popular = [song_id for song_id, _ in popularity.most_common(pool_size)]
+    started = time.time()
+    cold_count = 0
+
+    print("Preparing candidate scores once before alpha sweep...")
+    for idx, case in enumerate(cases, start=1):
+        exclude = set(case.observed)
+        cold_start = len(case.observed) <= cold_start_threshold
+
+        if cold_start:
+            cold_count += 1
+            candidates = {song_id for song_id in top_popular if song_id not in exclude}
+            long_norm: dict[str, float] = {}
+            short_norm: dict[str, float] = {}
+        else:
+            long_profile = index.profile(case.observed, decay=time_decay)
+            short_profile = index.profile(case.observed[-short_window:], decay=time_decay)
+            long_scores = index.score_profile(long_profile, exclude, pool_size)
+            short_scores = index.score_profile(short_profile, exclude, pool_size)
+            candidates = set(long_scores) | set(short_scores)
+            candidates.update(song_id for song_id in top_popular if song_id not in exclude)
+            long_norm = normalize_scores(long_scores, candidates)
+            short_norm = normalize_scores(short_scores, candidates)
+
+        pop_raw = {song_id: float(popularity.get(song_id, 0)) for song_id in candidates}
+        pop_norm = normalize_scores(pop_raw, candidates)
+        retrieval = recall_at_k(list(candidates), set(case.heldout), len(candidates))
+        prepared.append(
+            PreparedCase(
+                playlist_id=case.playlist_id,
+                heldout=case.heldout,
+                candidates=candidates,
+                long_norm=long_norm,
+                short_norm=short_norm,
+                pop_norm=pop_norm,
+                retrieval=retrieval,
+                cold_start=cold_start,
+            )
+        )
+
+        if progress_interval and (idx == 1 or idx % progress_interval == 0 or idx == len(cases)):
+            elapsed = time.time() - started
+            avg_candidates = sum(len(item.candidates) for item in prepared) / len(prepared)
+            print(
+                f"  prepared {idx:,}/{len(cases):,} cases | "
+                f"cold={cold_count:,} | avg_candidates={avg_candidates:.1f} | elapsed={elapsed:.1f}s",
+                flush=True,
+            )
+
+    return prepared
+
+
+def build_content_rankings(
+    prepared_cases: list[PreparedCase],
+    k: int,
     alpha: float,
     pop_weight: float,
 ) -> tuple[dict[str, list[str]], float]:
     rankings: dict[str, list[str]] = {}
     retrieval_recalls: list[float] = []
-    top_popular = [song_id for song_id, _ in popularity.most_common(pool_size)]
 
-    for case in cases:
-        exclude = set(case.train)
-        long_profile = index.profile(case.train)
-        short_profile = index.profile(case.train[-short_window:])
-        long_scores = index.score_profile(long_profile, exclude, pool_size)
-        short_scores = index.score_profile(short_profile, exclude, pool_size)
-
-        candidates = set(long_scores) | set(short_scores)
-        candidates.update(song_id for song_id in top_popular if song_id not in exclude)
-        retrieval_recalls.append(recall_at_k(list(candidates), set(case.heldout), len(candidates)))
-
-        long_norm = normalize_scores(long_scores, candidates)
-        short_norm = normalize_scores(short_scores, candidates)
-        pop_raw = {song_id: float(popularity.get(song_id, 0)) for song_id in candidates}
-        pop_norm = normalize_scores(pop_raw, candidates)
-
+    for case in prepared_cases:
+        retrieval_recalls.append(case.retrieval)
         final_scores = {
-            song_id: alpha * long_norm.get(song_id, 0.0)
-            + (1.0 - alpha) * short_norm.get(song_id, 0.0)
-            + pop_weight * pop_norm.get(song_id, 0.0)
-            for song_id in candidates
+            song_id: alpha * case.long_norm.get(song_id, 0.0)
+            + (1.0 - alpha) * case.short_norm.get(song_id, 0.0)
+            + pop_weight * case.pop_norm.get(song_id, 0.0)
+            for song_id in case.candidates
         }
         ranked = sorted(final_scores, key=lambda song_id: (-final_scores[song_id], song_id))
         rankings[case.playlist_id] = ranked[:k]
@@ -387,19 +444,24 @@ def print_dataset_study(songs: dict[str, Song], playlists: list[tuple[str, list[
     users = len(playlists)
     catalog = len(songs)
     density = matched_tracks / (users * catalog) if users and catalog else 0.0
-    train_lengths = [len(case.train) for case in cases]
+    observed_lengths = [len(case.observed) for case in cases]
+    heldout_lengths = [len(case.heldout) for case in cases]
     print("Dataset study")
     print(f"  songs with lyrics:       {len(songs):,}")
     print(f"  matched playlists:       {len(playlists):,}")
     print(f"  eval playlists:          {len(cases):,}")
     print(f"  matched interactions:    {matched_tracks:,}")
     print(f"  matrix density:          {density:.6f}")
-    if train_lengths:
-        sorted_lengths = sorted(train_lengths)
+    if observed_lengths:
+        sorted_lengths = sorted(observed_lengths)
         median = sorted_lengths[len(sorted_lengths) // 2]
-        cold = sum(1 for n in train_lengths if n <= 3)
-        print(f"  avg train playlist len:  {sum(train_lengths) / len(train_lengths):.2f}")
-        print(f"  median train length:     {median}")
+        cold = sum(1 for n in observed_lengths if n <= 3)
+        print(f"  avg observed length:     {sum(observed_lengths) / len(observed_lengths):.2f}")
+        print(f"  median observed length:  {median}")
+        sorted_heldout = sorted(heldout_lengths)
+        print(f"  avg heldout length:      {sum(heldout_lengths) / len(heldout_lengths):.2f}")
+        print(f"  median heldout length:   {sorted_heldout[len(sorted_heldout) // 2]}")
+        print(f"  min/max heldout length:  {min(heldout_lengths)} / {max(heldout_lengths)}")
         print(f"  cold playlists <= 3:     {cold:,}")
 
 
@@ -468,7 +530,7 @@ def print_example_recs(cases: list[EvalCase], rankings: dict[str, list[str]], so
     print()
     print(f"Example recommendations for playlist {case.playlist_id}")
     print("  input:")
-    for song_id in case.train[:limit]:
+    for song_id in case.observed[:limit]:
         song = songs[song_id]
         print(f"    - {song.title} / {song.artist}")
     print("  heldout:")
@@ -488,10 +550,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--playlist-csv", type=Path, help="Alternative simple playlist CSV")
     parser.add_argument("--demo", action="store_true", help="Force the tiny built-in demo instead of repo data")
     parser.add_argument("--max-playlists", type=int, default=50000)
-    parser.add_argument("--min-playlist-len", type=int, default=10)
+    parser.add_argument("--min-playlist-len", type=int, default=2)
+    parser.add_argument("--holdout-k", type=int, default=10, help="Use up to the last K songs as heldout truth")
     parser.add_argument("--pool-size", type=int, default=300)
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--short-window", type=int, default=5)
+    parser.add_argument("--time-decay", type=float, default=0.9, help="Older observed songs get decay^(distance from newest)")
+    parser.add_argument("--cold-start-threshold", type=int, default=1, help="Use popularity-only ranking when observed history has this many songs or fewer")
+    parser.add_argument("--progress-interval", type=int, default=1000, help="Print candidate-prep progress every N eval playlists")
     parser.add_argument("--min-df", type=int, default=2)
     parser.add_argument("--max-features", type=int, default=30000)
     parser.add_argument("--pop-weight", type=float, default=0.05)
@@ -522,6 +588,7 @@ def main() -> None:
     if args.demo:
         print("Running built-in demo data.")
         songs, playlists = make_demo_data()
+        args.holdout_k = min(args.holdout_k, 1)
         args.min_playlist_len = min(args.min_playlist_len, 5)
         args.min_df = 1
         args.pool_size = min(args.pool_size, 20)
@@ -560,11 +627,11 @@ def main() -> None:
         print("No playlist data found under data/. Put MPD mpd.slice.*.json files in data/ or pass --mpd-path.")
         return
 
-    cases = split_playlists(playlists, args.min_playlist_len)
+    cases = split_playlists(playlists, args.min_playlist_len, args.holdout_k)
     if not cases:
-        raise SystemExit("No evaluation playlists after lyrics join/filtering. Lower --min-playlist-len or check join columns.")
+        raise SystemExit("No evaluation playlists after lyrics join/filtering. Lower --min-playlist-len/--holdout-k or check join columns.")
 
-    eval_song_ids = {song_id for case in cases for song_id in case.train + case.heldout}
+    eval_song_ids = {song_id for case in cases for song_id in case.observed + case.heldout}
     songs = {song_id: song for song_id, song in songs.items() if song_id in eval_song_ids}
     catalog = set(songs)
     popularity = popularity_counts(cases)
@@ -575,6 +642,19 @@ def main() -> None:
     index = TfidfIndex(songs, args.min_df, args.max_features)
     print(f"  vocab size:              {len(index.vocab):,}")
     print(f"  indexed songs:           {len(index.item_vectors):,}")
+
+    prepared_cases = prepare_content_cases(
+        cases=cases,
+        index=index,
+        popularity=popularity,
+        pool_size=args.pool_size,
+        short_window=args.short_window,
+        time_decay=args.time_decay,
+        cold_start_threshold=args.cold_start_threshold,
+        progress_interval=args.progress_interval,
+    )
+    cold_prepared = sum(1 for case in prepared_cases if case.cold_start)
+    print(f"  cold-start popularity cases: {cold_prepared:,}")
 
     rng = random.Random(args.seed)
     random_rankings = {case.playlist_id: rank_random(case, catalog, args.top_k, rng) for case in cases}
@@ -600,12 +680,8 @@ def main() -> None:
     print("Lyrics TF-IDF fusion sweep")
     for alpha in alphas:
         rankings, retrieval = build_content_rankings(
-            cases=cases,
-            index=index,
-            popularity=popularity,
-            pool_size=args.pool_size,
             k=args.top_k,
-            short_window=args.short_window,
+            prepared_cases=prepared_cases,
             alpha=alpha,
             pop_weight=args.pop_weight,
         )
@@ -626,6 +702,7 @@ def main() -> None:
     print(f"  method:                 lyrics_tfidf_long_short_fusion")
     print(f"  alpha long-term:        {alpha:.2f}")
     print(f"  alpha short-term:       {1.0 - alpha:.2f}")
+    print(f"  time decay:             {args.time_decay:.2f}")
     print(f"  popularity tie weight:  {args.pop_weight:.2f}")
     print(f"  Retrieval@{args.pool_size}:          {retrieval:.5f}")
     print(f"  Recall@{args.top_k}:             {recall:.5f}")

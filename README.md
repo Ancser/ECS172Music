@@ -1,4 +1,4 @@
-# ECS172 Music Recommendation Project
+﻿# ECS172 Music Recommendation Project
 
 ## 1. Project Direction
 
@@ -7,8 +7,8 @@ This project builds an emotion-aware playlist continuation recommender.
 The proposal direction is:
 
 ```text
-Input:  first 80% of a playlist
-Target: last 20% of that playlist
+Input:  all earlier songs in a playlist
+Target: up to final 10 songs of that playlist
 Output: top-10 recommended songs
 Metrics: Recall@10 and NDCG@10
 ```
@@ -65,7 +65,7 @@ data/mpd.slice.1000-1999.json
 Download the large Spotify Million Playlist Dataset once:
 
 ```bat
-pushd F:\ancserProject\ECS172Music
+pushd <project-folder>
 python .\download.py --playlists
 ```
 
@@ -120,7 +120,7 @@ cold playlists with <= 3 observed songs
 Run current data review:
 
 ```bat
-pushd F:\ancserProject\ECS172Music
+pushd <project-folder>
 python .\newSpotify.py
 ```
 
@@ -128,23 +128,27 @@ At the moment, this prints lyric stats even before playlist slices are downloade
 
 ## 5. Validation
 
-Use playlist-order holdout:
+Use fixed last-10 playlist-order holdout:
 
 ```text
-observed = first 80% of playlist
-heldout  = last 20% of playlist
+heldout  = playlist[-min(10, len(playlist)-1):]
+observed = all songs before heldout
 ```
 
-Do not randomly split tracks for the main experiment, because the task is playlist continuation.
+Do not randomly split tracks for the main experiment, because the task is playlist continuation. The goal is: given the earlier playlist history, recommend the next/final songs, up to 10.
 
 Evaluation rules:
 
 ```text
 recommendations must exclude observed songs
-truth = heldout songs
+truth = final heldout songs, up to 10
 top K = 10 for final recommendations
 candidate K = 300 for Stage 1 retrieval
+default min playlist length = 2
+one observed song is valid
 ```
+
+If a playlist has only one observed song, it is treated as cold-start and ranked by popularity.
 
 Metrics:
 
@@ -185,15 +189,41 @@ Algorithm:
 Long-term profile:
 
 ```text
-profile_long = average TF-IDF vector of all observed songs
+profile_long = time-decayed average TF-IDF vector of all observed songs
 score_long(candidate) = cosine(profile_long, candidate_vector)
 ```
 
 Short-term profile:
 
 ```text
-profile_short = average TF-IDF vector of last N observed songs
+profile_short = time-decayed average TF-IDF vector of last N observed songs
 score_short(candidate) = cosine(profile_short, candidate_vector)
+```
+
+Time decay:
+
+```text
+newest observed song weight = 1.0
+one song older = time_decay
+two songs older = time_decay^2
+default time_decay = 0.90
+```
+
+Cold-start shortcut:
+
+```text
+if observed length <= cold_start_threshold:
+  skip TF-IDF profile scoring
+  rank candidates with popularity fallback
+default cold_start_threshold = 1
+```
+
+Speedup:
+
+```text
+candidate scores are prepared once
+alpha sweep reuses cached long/short/popularity scores
+progress prints every --progress-interval eval playlists
 ```
 
 ### Route B: Co-Occurrence CF
@@ -425,20 +455,22 @@ Item2Vec: playlist sequence embedding baseline
 Run demo pipeline:
 
 ```bat
-pushd F:\ancserProject\ECS172Music
+pushd <project-folder>
 python .\newSpotify.py --demo
 ```
 
 Run data review / real pipeline after playlist slices exist:
 
 ```bat
-pushd F:\ancserProject\ECS172Music
-python .\newSpotify.py --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 50000 --min-playlist-len 10 --pool-size 300
+pushd <project-folder>
+python .\newSpotify.py --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 50000 --min-playlist-len 2 --holdout-k 10 --pool-size 300 --time-decay 0.9 --progress-interval 1000
 ```
 
 Download playlist data once:
 
 ```bat
-pushd F:\ancserProject\ECS172Music
+pushd <project-folder>
 python .\download.py --playlists
 ```
+
+
