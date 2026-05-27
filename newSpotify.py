@@ -30,6 +30,9 @@ TOKEN_RE = re.compile(r"[a-z][a-z']+")
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = ROOT / "data"
 DEFAULT_LYRICS_CSV = DEFAULT_DATA_DIR / "spotify_millsongdata.csv"
+DEFAULT_LLM_CACHE_DIR = ROOT / "models" / "llm_cache"
+DEFAULT_LLM_EMOTION_CACHE_DIR = ROOT / "models" / "llm_emotion_cache"
+DEFAULT_LLM_MODEL = "google/gemma-3-270m-it"
 
 EMOTION_LEXICON = {
     "love": {
@@ -67,9 +70,9 @@ EMOTION_VECTOR = {
     "calm": (0.20, 0.15),
     "hope": (0.65, 0.55),
     "nostalgia": (0.15, 0.30),
+    "neutral": (0.0, 0.35),
     "other": (0.0, 0.5),
 }
-
 
 @dataclass(frozen=True)
 class Song:
@@ -175,6 +178,164 @@ def build_song_features(songs: dict[str, Song]) -> dict[str, SongFeature]:
             arousal=arousal,
         )
     return features
+
+
+def emotion_cache_path(cache_dir: Path, model_name: str) -> Path:
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "__", model_name)
+    return cache_dir / f"{safe_name}.csv"
+
+
+def read_emotion_feature_cache(path: Path) -> dict[str, SongFeature]:
+    if not path.exists():
+        return {}
+    cached: dict[str, SongFeature] = {}
+    with path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            song_id = row.get("song_id", "")
+            if not song_id:
+                continue
+            try:
+                cached[song_id] = SongFeature(
+                    language=row.get("language", "unknown"),
+                    primary_type=row.get("primary_type", "other"),
+                    valence=float(row.get("valence", "0")),
+                    arousal=float(row.get("arousal", "0.5")),
+                )
+            except ValueError:
+                continue
+    return cached
+
+
+def write_emotion_feature_cache(path: Path, features: dict[str, SongFeature]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["song_id", "language", "primary_type", "valence", "arousal"])
+        writer.writeheader()
+        for song_id, feature in sorted(features.items()):
+            writer.writerow(
+                {
+                    "song_id": song_id,
+                    "language": feature.language,
+                    "primary_type": feature.primary_type,
+                    "valence": f"{feature.valence:.6f}",
+                    "arousal": f"{feature.arousal:.6f}",
+                }
+            )
+
+def parse_llm_feature(text: str, language: str) -> SongFeature:
+    allowed = set(EMOTION_VECTOR)
+    label = "neutral"
+    valence = EMOTION_VECTOR[label][0]
+    arousal = EMOTION_VECTOR[label][1]
+    match = re.search(r"\{.*?\}", text, flags=re.DOTALL)
+    if match:
+        try:
+            payload = json.loads(match.group(0))
+            raw_label = normalize_text(str(payload.get("primary_type", payload.get("emotion", label))))
+            if raw_label in allowed:
+                label = raw_label
+            valence = max(-1.0, min(1.0, float(payload.get("valence", EMOTION_VECTOR[label][0]))))
+            arousal = max(0.0, min(1.0, float(payload.get("arousal", EMOTION_VECTOR[label][1]))))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    return SongFeature(language=language, primary_type=label, valence=valence, arousal=arousal)
+
+
+def llm_prompt(song: Song, max_chars: int) -> str:
+    lyrics = song.lyrics[:max_chars].replace("\r", " ").replace("\n", " ")
+    return (
+        "Classify the song lyrics for a music recommendation experiment.\n"
+        "Return only compact JSON with keys primary_type, valence, arousal.\n"
+        "primary_type must be one of: love, sadness, energy, anger, calm, hope, nostalgia, neutral.\n"
+        "valence is from -1.0 negative to 1.0 positive. arousal is from 0.0 calm to 1.0 energetic.\n"
+        f"Artist: {song.artist}\n"
+        f"Title: {song.title}\n"
+        f"Lyrics: {lyrics}\n"
+        "JSON:"
+    )
+
+
+def build_llm_song_features(
+    songs: dict[str, Song],
+    model_name: str,
+    llm_cache_dir: Path,
+    emotion_cache_dir: Path,
+    max_chars: int,
+    limit: int,
+    progress_interval: int,
+    device: str,
+) -> dict[str, SongFeature]:
+    cache_path = emotion_cache_path(emotion_cache_dir, model_name)
+    features = read_emotion_feature_cache(cache_path)
+    missing_ids = [song_id for song_id in songs if song_id not in features]
+    if limit > 0:
+        missing_ids = missing_ids[:limit]
+    print(f"  LLM emotion cache:      {cache_path}")
+    print(f"  cached features:        {len(features):,}")
+    print(f"  missing this run:       {len(missing_ids):,}")
+    if not missing_ids:
+        return {song_id: features[song_id] for song_id in songs if song_id in features}
+
+    import os
+
+    llm_hub_cache = llm_cache_dir / "hub"
+    llm_hub_cache.mkdir(parents=True, exist_ok=True)
+    os.environ["HF_HUB_CACHE"] = str(llm_hub_cache)
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    resolved_device = device
+    if resolved_device == "auto":
+        resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.float16 if resolved_device == "cuda" else torch.float32
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=dtype,
+            low_cpu_mem_usage=True,
+        )
+    except Exception as exc:
+        message = str(exc)
+        print()
+        print("Could not load the LLM emotion model.")
+        print("Most common reason for Gemma: the model is gated on Hugging Face.")
+        print("Fix:")
+        print("  1. Open https://huggingface.co/google/gemma-3-270m-it")
+        print("  2. Accept the Google usage license")
+        print("  3. Run: python -m huggingface_hub.cli.hf auth login")
+        print("  4. Re-run install_llm.py, then re-run this command")
+        print()
+        print(message[:1200])
+        raise SystemExit(2) from exc
+    model.to(resolved_device)
+    model.eval()
+
+    started = time.time()
+    for idx, song_id in enumerate(missing_ids, start=1):
+        song = songs[song_id]
+        tokens = tokenize(song.lyrics)
+        language = detect_language(tokens, song.lyrics)
+        prompt = llm_prompt(song, max_chars)
+        encoded = tokenizer(prompt, return_tensors="pt").to(resolved_device)
+        with torch.no_grad():
+            output = model.generate(
+                **encoded,
+                max_new_tokens=48,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        generated = output[0][encoded["input_ids"].shape[-1] :]
+        text = tokenizer.decode(generated, skip_special_tokens=True)
+        features[song_id] = parse_llm_feature(text, language)
+        if progress_interval and (idx == 1 or idx % progress_interval == 0 or idx == len(missing_ids)):
+            elapsed = time.time() - started
+            print(f"  llm-tagged {idx:,}/{len(missing_ids):,} missing songs | total_cached={len(features):,} | elapsed={elapsed:.1f}s", flush=True)
+            write_emotion_feature_cache(cache_path, features)
+
+    write_emotion_feature_cache(cache_path, features)
+    return {song_id: features[song_id] for song_id in songs if song_id in features}
 
 
 def find_column(fieldnames: list[str], options: list[str]) -> str:
@@ -434,18 +595,40 @@ def evaluate_rankings(rankings: dict[str, list[str]], cases: list[EvalCase], k: 
     return sum(recalls) / len(recalls), sum(ndcgs) / len(ndcgs)
 
 
-def print_results_table(rows: list[dict[str, float | str]]) -> None:
+def print_results_table(
+    rows: list[dict[str, float | str]],
+    comparison_model: str = "CF + popularity baseline",
+) -> None:
+    comparison_row = next((row for row in rows if row["model"] == comparison_model), None)
+    if comparison_row is None:
+        comparison_row = next((row for row in rows if row["model"] == "Popularity"), None)
+        comparison_model = "Popularity"
+
+    base_recall = float(comparison_row["recall"]) if comparison_row else 0.0
+    base_ndcg = float(comparison_row["ndcg"]) if comparison_row else 0.0
+    base_proxy = float(comparison_row["proxy"]) if comparison_row else 0.0
+
     print()
     print("Results table")
-    print(f"{'Model':<28} {'Retrieval':>10} {'Recall':>10} {'NDCG':>10} {'Proxy':>10}")
-    print("-" * 72)
+    print(f"Comparison baseline: {comparison_model}")
+    header = (
+        f"{'Model':<28} {'Retrieval':>10} {'Recall':>10} {'dRecall':>10} "
+        f"{'NDCG':>10} {'dNDCG':>10} {'Proxy':>10} {'dProxy':>10}"
+    )
+    print(header)
+    print("-" * len(header))
     for row in rows:
         retrieval = row["retrieval"]
         retrieval_text = "-" if retrieval == "" else f"{float(retrieval):.5f}"
         recall = float(row["recall"])
         ndcg = float(row["ndcg"])
         proxy = float(row["proxy"])
-        print(f"{str(row['model']):<28} {retrieval_text:>10} {recall:>10.5f} {ndcg:>10.5f} {proxy:>10.5f}")
+        print(
+            f"{str(row['model']):<28} {retrieval_text:>10} "
+            f"{recall:>10.5f} {recall - base_recall:>+10.5f} "
+            f"{ndcg:>10.5f} {ndcg - base_ndcg:>+10.5f} "
+            f"{proxy:>10.5f} {proxy - base_proxy:>+10.5f}"
+        )
 
 
 def result_row(
@@ -873,6 +1056,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cold-start-threshold", type=int, default=1, help="Use popularity-only ranking when observed history has this many songs or fewer")
     parser.add_argument("--progress-interval", type=int, default=1000, help="Print candidate-prep progress every N eval playlists")
     parser.add_argument("--cf-neighbors", type=int, default=100, help="Keep top N co-occurrence neighbors per song")
+    parser.add_argument("--emotion-source", choices=["weak", "llm"], default="weak")
+    parser.add_argument("--emotion-max-chars", type=int, default=1200)
+    parser.add_argument("--emotion-limit", type=int, default=0, help="Only tag this many missing songs; 0 means all missing songs")
+    parser.add_argument("--llm-model", default=DEFAULT_LLM_MODEL)
+    parser.add_argument("--llm-cache-dir", type=Path, default=DEFAULT_LLM_CACHE_DIR)
+    parser.add_argument("--llm-emotion-cache-dir", type=Path, default=DEFAULT_LLM_EMOTION_CACHE_DIR)
+    parser.add_argument("--llm-device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--lyrics-weight", type=float, default=0.25)
     parser.add_argument("--cf-weight", type=float, default=0.35)
     parser.add_argument("--mood-weight", type=float, default=0.15)
@@ -964,7 +1154,25 @@ def main() -> None:
     print_dataset_study(songs, playlists, cases)
     print()
     print("Building song feature table...")
-    features = build_song_features(songs)
+    if args.emotion_source == "llm":
+        features = build_llm_song_features(
+            songs=songs,
+            model_name=args.llm_model,
+            llm_cache_dir=args.llm_cache_dir,
+            emotion_cache_dir=args.llm_emotion_cache_dir,
+            max_chars=args.emotion_max_chars,
+            limit=args.emotion_limit,
+            progress_interval=args.progress_interval,
+            device=args.llm_device,
+        )
+        missing_features = set(songs) - set(features)
+        if missing_features:
+            print(f"  LLM features incomplete; using weak fallback for {len(missing_features):,} songs.")
+            weak_features = build_song_features({song_id: songs[song_id] for song_id in missing_features})
+            features.update(weak_features)
+    else:
+        features = build_song_features(songs)
+    print(f"  emotion source:         {args.emotion_source}")
     type_counts = Counter(feature.primary_type for feature in features.values())
     language_counts = Counter(feature.language for feature in features.values())
     print("  top lyric types:         " + ", ".join(f"{k}={v:,}" for k, v in type_counts.most_common(5)))
@@ -1041,6 +1249,7 @@ def main() -> None:
     if 1.0 not in alphas:
         alphas.append(1.0)
 
+    hybrid_label = f"Hybrid {args.emotion_source}"
     best = None
     print()
     print("Hybrid fusion sweep")
@@ -1063,7 +1272,7 @@ def main() -> None:
             f"  alpha={alpha:>4.2f}  Retrieval@{args.pool_size}: {retrieval:.5f}  "
             f"Recall@{args.top_k}: {recall:.5f}  NDCG@{args.top_k}: {ndcg:.5f}  Proxy: {proxy:.5f}"
         )
-        result_rows.append(result_row(f"Hybrid alpha={alpha:.2f}", retrieval, recall, ndcg))
+        result_rows.append(result_row(f"{hybrid_label} alpha={alpha:.2f}", retrieval, recall, ndcg))
         candidate = (proxy, recall, ndcg, retrieval, alpha, rankings)
         if best is None or candidate[:4] > best[:4]:
             best = candidate
@@ -1072,7 +1281,7 @@ def main() -> None:
     proxy, recall, ndcg, retrieval, alpha, rankings = best
     print()
     print("Best prototype result")
-    print(f"  method:                 hybrid_cf_metadata_mood_tfidf")
+    print(f"  method:                 hybrid_cf_metadata_mood_tfidf_{args.emotion_source}")
     print(f"  alpha long-term:        {alpha:.2f}")
     print(f"  alpha short-term:       {1.0 - alpha:.2f}")
     print(f"  time decay:             {args.time_decay:.2f}")
@@ -1081,7 +1290,7 @@ def main() -> None:
     print(f"  Recall@{args.top_k}:             {recall:.5f}")
     print(f"  NDCG@{args.top_k}:               {ndcg:.5f}")
     print(f"  Proxy:                 {proxy:.5f}")
-    result_rows.append(result_row(f"Best Hybrid alpha={alpha:.2f}", retrieval, recall, ndcg))
+    result_rows.append(result_row(f"Best {hybrid_label} alpha={alpha:.2f}", retrieval, recall, ndcg))
     if not args.no_ablations:
         print()
         print("Ablation comparisons at best alpha")

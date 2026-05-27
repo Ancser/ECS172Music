@@ -1,2 +1,4 @@
-/data
-__pycache__/newSpotify.cpython-310.pyc
+﻿/data/
+/models/
+__pycache__/
+*.pyc

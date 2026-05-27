@@ -40,11 +40,12 @@ data review
 ## 2. Current Files
 
 ```text
-newSpotify.py   main prototype and evaluator
-download.py     one-time Kaggle downloader
-skill.md        detailed algorithm workflow notes
-SPEC.md         pointer to this README
-data/           local datasets
+newSpotify.py      main prototype and evaluator
+download_data.py   one-time Kaggle data downloader
+install_llm.py     optional Gemma 3 LLM downloader/tester
+skill.md           detailed algorithm workflow notes
+SPEC.md            pointer to this README
+data/              local datasets
 ```
 
 Current local data:
@@ -66,7 +67,7 @@ Download the large Spotify Million Playlist Dataset once:
 
 ```bat
 pushd <project-folder>
-python .\download.py --playlists
+python .\download_data.py --playlists
 ```
 
 The downloader skips work if `data/mpd.slice.*.json` already exists.
@@ -358,6 +359,67 @@ Do not assume a learned classifier is better. Logistic regression or MLP should 
 
 Do not add LLM calls until the TF-IDF, popularity, and CF baselines are measured.
 
+### Option 1: Small Gemma 3 LLM Emotion Tagger
+
+Use this as the first LLM test path. The local machine has limited GPU memory, so the default is the smallest Gemma 3 instruction model:
+
+```text
+google/gemma-3-270m-it
+```
+
+Reference links:
+
+```text
+Google Gemma 3 docs: https://ai.google.dev/gemma/docs/core
+Gemma 3 270M announcement: https://developers.googleblog.com/introducing-gemma-3-270m/
+Hugging Face model: https://huggingface.co/google/gemma-3-270m-it
+```
+
+Purpose:
+
+```text
+lyrics -> JSON emotion label, valence, arousal
+compare CF+popularity vs CF+popularity+Gemma-emotion
+check whether LLM emotion tags help more than weak keyword tags
+```
+
+Install/download/test:
+
+```bat
+pushd <project-folder>
+python .\install_llm.py
+```
+
+Gemma models on Hugging Face may require license acceptance before download:
+
+```text
+1. Open https://huggingface.co/google/gemma-3-270m-it
+2. Accept the Google usage license
+3. Run: python -m huggingface_hub.cli.hf auth login
+4. Run python .\install_llm.py again
+```
+
+The model cache is stored under:
+
+```text
+models/llm_cache
+```
+
+When `newSpotify.py` uses `--emotion-source llm`, per-song LLM emotion tags are cached under:
+
+```text
+models/llm_emotion_cache
+```
+
+Run a small Gemma comparison first:
+
+```bat
+pushd <project-folder>
+python .\newSpotify.py --emotion-source llm --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 100 --alpha-grid-step 0.5 --emotion-limit 200 --progress-interval 25
+```
+
+Keep `--emotion-limit` small at first. LLM tagging is slow, but cached tags are reused on later runs.
+
 Later offline emotion table:
 
 ```text
@@ -403,7 +465,8 @@ Lyrics TF-IDF long-term
 Lyrics TF-IDF short-term
 Lyrics TF-IDF long/short fusion
 Co-occurrence CF
-Lyrics TF-IDF + CF + popularity
+CF + popularity baseline
+Hybrid CF + metadata + mood + lyrics TF-IDF
 ```
 
 Later LLM variants:
@@ -412,6 +475,7 @@ Later LLM variants:
 LLM emotion only
 CF + LLM emotion
 CF + lyrics TF-IDF + LLM emotion
+CF + Gemma 3 LLM emotion
 with vs without mood drift
 learned fusion
 knowledge distillation
@@ -431,15 +495,26 @@ CF similarity = raw, cosine, PPMI
 Result table:
 
 ```text
-| Model | Retrieval | Recall | NDCG | Proxy |
-|---|---:|---:|---:|---:|
-| Random | - | ? | ? | ? |
-| Popularity | - | ? | ? | ? |
-| TF-IDF alpha=0.00 | ? | ? | ? | ? |
-| TF-IDF alpha=0.50 | ? | ? | ? | ? |
-| TF-IDF alpha=1.00 | ? | ? | ? | ? |
-| Best TF-IDF alpha=? | ? | ? | ? | ? |
+Comparison baseline: CF + popularity baseline
+Model                         Retrieval     Recall    dRecall       NDCG      dNDCG      Proxy     dProxy
+----------------------------------------------------------------------------------------------------------
+Random                                -          ?          ?          ?          ?          ?          ?
+Popularity                            -          ?          ?          ?          ?          ?          ?
+CF + popularity baseline              ?          ?   +0.00000          ?   +0.00000          ?   +0.00000
+Hybrid alpha=0.00                     ?          ?          ?          ?          ?          ?          ?
+Hybrid alpha=0.50                     ?          ?          ?          ?          ?          ?          ?
+Hybrid alpha=1.00                     ?          ?          ?          ?          ?          ?          ?
+Best Hybrid alpha=?                   ?          ?          ?          ?          ?          ?          ?
+Hybrid llm alpha=0.50                 ?          ?          ?          ?          ?          ?          ?
+No CF                                 ?          ?          ?          ?          ?          ?          ?
+No mood/drift                         ?          ?          ?          ?          ?          ?          ?
+No metadata                           ?          ?          ?          ?          ?          ?          ?
+No lyrics                             ?          ?          ?          ?          ?          ?          ?
 ```
+
+`dRecall`, `dNDCG`, and `dProxy` are measured against `CF + popularity baseline`.
+Positive values mean the added lyric, metadata, or emotion signal helped over the strongest simple recommender.
+Negative values mean that signal hurt ranking accuracy on that run.
 
 ## 10. Report Direction
 
@@ -491,12 +566,23 @@ pushd <project-folder>
 python .\newSpotify.py --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --min-playlist-len 2 --holdout-k 10 --pool-size 300 --time-decay 0.9 --max-eval-cases 1000 --progress-interval 100
 ```
 
+Install and run the smallest Gemma 3 LLM comparison:
+
+```bat
+pushd <project-folder>
+python -m huggingface_hub.cli.hf auth login
+python .\install_llm.py
+python .\newSpotify.py --emotion-source llm --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 100 --alpha-grid-step 0.5 --emotion-limit 200 --progress-interval 25
+```
+
 Download playlist data once:
 
 ```bat
 pushd <project-folder>
-python .\download.py --playlists
+python .\download_data.py --playlists
 ```
+
+
 
 
 

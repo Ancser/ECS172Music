@@ -25,7 +25,7 @@ First-time setup must download the playlist data before real validation can run:
 
 ```powershell
 pushd <project-folder>
-python .\download.py --playlists
+python .\download_data.py --playlists
 ```
 
 After data exists, run the real data review / prototype:
@@ -34,6 +34,18 @@ After data exists, run the real data review / prototype:
 pushd <project-folder>
 python .\newSpotify.py --mpd-path .\data --lyrics-csv .\data\spotify_millsongdata.csv --max-playlists 1000 --max-eval-cases 1000 --holdout-k 10 --min-playlist-len 2 --time-decay 0.9 --progress-interval 100
 ```
+
+Optional Gemma 3 LLM setup and small comparison run:
+
+```powershell
+pushd <project-folder>
+python -m huggingface_hub.cli.hf auth login
+python .\install_llm.py
+python .\newSpotify.py --emotion-source llm --mpd-path .\data --lyrics-csv .\data\spotify_millsongdata.csv --max-playlists 1000 --max-eval-cases 100 --holdout-k 10 --min-playlist-len 20 --pool-size 100 --alpha-grid-step 0.5 --emotion-limit 200 --progress-interval 25
+```
+
+Default LLM model: `google/gemma-3-270m-it`.
+Use this first because the local GPU memory budget is about 3 GB.
 
 For a quick no-data demo:
 
@@ -641,7 +653,8 @@ Lyrics TF-IDF long-term
 Lyrics TF-IDF short-term
 Lyrics TF-IDF long/short fusion
 Co-occurrence CF
-Lyrics TF-IDF + CF + popularity
+CF + popularity baseline
+Hybrid CF + metadata + mood + lyrics TF-IDF
 ```
 
 Later LLM variants:
@@ -650,6 +663,7 @@ Later LLM variants:
 LLM emotion only
 CF + LLM emotion
 CF + lyrics TF-IDF + LLM emotion
+CF + Gemma 3 LLM emotion
 mood drift ablation
 ```
 
@@ -695,17 +709,25 @@ PPMI
 Use this table structure:
 
 ```text
-| Model | Retrieval | Recall | NDCG | Proxy |
-|---|---:|---:|---:|---:|
-| Random | - | ? | ? | ? |
-| Popularity | - | ? | ? | ? |
-| TF-IDF alpha=0.00 | ? | ? | ? | ? |
-| TF-IDF alpha=0.50 | ? | ? | ? | ? |
-| TF-IDF alpha=1.00 | ? | ? | ? | ? |
-| Best TF-IDF alpha=? | ? | ? | ? | ? |
+Comparison baseline: CF + popularity baseline
+Model                         Retrieval     Recall    dRecall       NDCG      dNDCG      Proxy     dProxy
+----------------------------------------------------------------------------------------------------------
+Random                                -          ?          ?          ?          ?          ?          ?
+Popularity                            -          ?          ?          ?          ?          ?          ?
+CF + popularity baseline              ?          ?   +0.00000          ?   +0.00000          ?   +0.00000
+Hybrid alpha=0.00                     ?          ?          ?          ?          ?          ?          ?
+Hybrid alpha=0.50                     ?          ?          ?          ?          ?          ?          ?
+Hybrid alpha=1.00                     ?          ?          ?          ?          ?          ?          ?
+Best Hybrid alpha=?                   ?          ?          ?          ?          ?          ?          ?
+Hybrid llm alpha=0.50                 ?          ?          ?          ?          ?          ?          ?
+No CF                                 ?          ?          ?          ?          ?          ?          ?
+No mood/drift                         ?          ?          ?          ?          ?          ?          ?
+No metadata                           ?          ?          ?          ?          ?          ?          ?
+No lyrics                             ?          ?          ?          ?          ?          ?          ?
 ```
 
 Include data stats above the result table so results are interpretable.
+Use `dRecall`, `dNDCG`, and `dProxy` to explain whether each added component improves over the strongest simple baseline.
 
 ## 7. Cold Start And Bias Checks
 
@@ -795,6 +817,15 @@ pushd <project-folder>
 python .\newSpotify.py --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --min-playlist-len 2 --holdout-k 10 --pool-size 300 --time-decay 0.9 --max-eval-cases 1000 --progress-interval 100
 ```
 
+Gemma 3 LLM run:
+
+```powershell
+pushd <project-folder>
+python -m huggingface_hub.cli.hf auth login
+python .\install_llm.py
+python .\newSpotify.py --emotion-source llm --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 100 --alpha-grid-step 0.5 --emotion-limit 200 --progress-interval 25
+```
+
 ## 9. Final Lesson
 
 The project should progress in this order:
@@ -817,6 +848,7 @@ Stage 1 finds enough plausible songs
 Stage 2 orders the best 10
 validation proves whether the change helped
 ```
+
 
 
 
