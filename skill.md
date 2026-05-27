@@ -1,312 +1,451 @@
-# Multi-Stage Recommendation Workflow Skill
+﻿# Music Recommendation Algorithm Workflow Skill
 
-## 0. Purpose
+## 0. Response Rule And First Run
 
-This note summarizes the Steam recommendation workflow we built, the concepts that were initially confusing, the final decisions, and how to reuse the same process for a future music recommendation algorithm.
+At the end of every project response, include a short runnable command block that:
 
-The core lesson is:
+1. Changes into the current project folder.
+2. Executes the most relevant command for the current state.
 
-```text
-Stage 1 should optimize candidate recall.
-Stage 2 should optimize final ranking quality.
-Do not assume the signal that feels most personal is automatically best.
-Validate each stage separately.
+Use a generic project folder placeholder in reusable docs:
+
+```powershell
+pushd <project-folder>
 ```
 
-## 1. What We Built
-
-We built a multi-stage recommender for Steam games.
-
-Final pipeline:
+For this active conversation only, the current local folder is:
 
 ```text
-data
-  -> Stage 1 retrieval
-  -> top-300 candidate pool
+F:\ancserProject\ECS172Music
+```
+
+When answering in this conversation, use the real current folder in the final command block.
+
+First-time setup must download the playlist data before real validation can run:
+
+```powershell
+pushd <project-folder>
+python .\download.py --playlists
+```
+
+After data exists, run the real data review / prototype:
+
+```powershell
+pushd <project-folder>
+python .\newSpotify.py --mpd-path .\data --lyrics-csv .\data\spotify_millsongdata.csv
+```
+
+For a quick no-data demo:
+
+```powershell
+pushd <project-folder>
+python .\newSpotify.py --demo
+```
+
+If a command cannot run yet because data is missing, still show the command and clearly state what file or folder is needed first.
+
+## 1. Purpose
+
+This skill defines the working algorithm structure for the ECS172 music recommendation project.
+
+The project goal is playlist continuation:
+
+```text
+Input:  first 80% of a playlist
+Target: last 20% of the same playlist
+Output: top-10 recommended songs
+Metric: Recall@10 and NDCG@10
+```
+
+The current prototype must stay simple and measurable before adding LLMs:
+
+```text
+lyrics CSV + playlist data
+  -> data review
+  -> Stage 1 candidate retrieval
   -> Stage 2 ranking
-  -> top-10 recommendations
   -> validation metrics
-  -> submission.csv
+  -> algorithm comparison
 ```
 
-Final command:
-
-```bat
-cd /d F:\ancserProject\ECS172Steam
-python steam.py --stage1-weights 0.10,0.10,0.80 --stage2-grid-step 0.20
-```
-
-Final best validation result:
+Core principle:
 
 ```text
-Algorithm: stage2_grid_manual_ranker
-Stage 1 weights:
-  content    0.10
-  item-CF    0.10
-  popularity 0.80
-
-Stage 2 weights:
-  content_score_norm 0.00
-  itemcf_score_norm  0.20
-  popularity_norm    0.20
-  avg_playtime_norm  0.20
-  tag_overlap        0.40
-
-Retrieval@300: 0.47834
-Recall@10:     0.06830
-NDCG@10:       0.05293
-Proxy:         0.06062
+Stage 1 optimizes candidate recall.
+Stage 2 optimizes top-10 ranking quality.
+Validate each stage separately.
+Do not add LLM or learned models before the baselines are measured.
 ```
 
-## 2. What Was Confusing At First
+## 2. Data Review
 
-### 2.1 Two-Stage vs Two-Tower
+Always start by understanding the data before modeling.
 
-Important distinction:
+### 2.1 Required Data Sources
+
+Lyrics data:
 
 ```text
-Two-stage = system pipeline
-Two-tower = model architecture
+data/spotify_millsongdata.csv
+columns usually: artist, song, link, text
 ```
 
-Our project is two-stage:
+Playlist data:
 
 ```text
-Stage 1: retrieve candidates
-Stage 2: rerank candidates
+data/mpd.slice.*.json
+source: Spotify Million Playlist Dataset
+each playlist is treated as a proxy user/session
 ```
 
-It is not a neural two-tower model. A two-tower model could be used as one possible Stage 1 retrieval method, but it is not required for this assignment.
-
-### 2.2 Content Retrieval vs Item-CF vs Matrix Factorization
-
-Content retrieval:
+A simple custom playlist CSV can also be used:
 
 ```text
-Uses metadata.
-Example: title, tags, genres, specs, developer, publisher, sentiment.
-Can work for cold items if metadata exists.
+playlist_id, track_name, artist_name, position
 ```
 
-Item-CF:
+### 2.2 Join Logic
+
+Join lyrics to playlist tracks by normalized:
 
 ```text
-Uses user-item interactions.
-Example: users who played the same games also played these other games.
-Cannot help items with no interactions.
+(artist_name, track_name)
 ```
 
-Matrix factorization / ALS:
+Normalization should:
 
 ```text
-Learns latent user vectors and latent item vectors from the interaction matrix.
-Score = user vector dot item vector.
-We did not implement ALS/MF in the final Steam code.
+lowercase text
+remove bracketed suffixes like "(Remastered)" or "[Live]"
+remove punctuation
+collapse whitespace
 ```
 
-### 2.3 Interaction Data
-
-In this assignment, every row in `train.csv` is a positive interaction.
-
-Even when:
+Important join metrics:
 
 ```text
-playtime_minutes = 0
+raw lyric rows
+unique lyric songs
+raw playlist count
+raw playlist tracks
+matched playlist tracks
+unique matched tracks
+lyrics coverage = matched playlist tracks / raw playlist tracks
+playlist retention = playlists after filtering / raw playlists
 ```
 
-the row still counts as:
+### 2.3 Filtering
+
+Filter for meaningful evaluation:
 
 ```text
-label = 1
+playlist length after lyrics join >= 10
+at least 1 held-out song after 80/20 split
+deduplicate repeated tracks within a playlist before splitting
 ```
 
-But playtime still affects profile strength. A zero-playtime row gets the minimum playtime weight, not a strong preference weight.
-
-### 2.4 Matrix Density and Sparsity
-
-The Steam user-item matrix is very sparse.
+Use smaller samples first:
 
 ```text
-10,000 users x 32,132 games = 321,320,000 possible pairs
-122,366 observed interactions
-density = 0.038%
-sparsity = 99.962%
+max_playlists = 1,000 for debugging
+max_playlists = 50,000 for first real experiment
+max_playlists = 100,000 if runtime is acceptable
 ```
 
-Meaning:
+### 2.4 Data Statistics To Print
+
+For every run, print:
 
 ```text
-Most user-game pairs are unknown.
-Most users have very short histories.
-Collaborative signals alone are weak for many users/items.
+head 10 songs
+head 10 playlists
+song lyric rows
+playlist count
+matched interactions
+unique matched tracks
+average playlist length
+median playlist length
+min/max playlist length
+average lyric token count
+median lyric token count
+matrix density
+cold playlists with <= 3 observed songs
 ```
 
-This is why content retrieval and popularity fallback matter.
-
-## 3. Dataset Study
-
-Before modeling, we studied the data distribution.
-
-Important observations:
+Matrix density:
 
 ```text
-train interactions: 122,366
-train users: 10,000
-catalog games: 32,132
-games observed in train: 8,036
-unseen catalog games: 24,096
-average user games: 12.24
-median user games: 7
-cold users <= 3 games: 1,702
+density = matched_interactions / (num_playlists * unique_tracks)
+sparsity = 1 - density
 ```
 
 Interpretation:
 
 ```text
-Many users have limited history.
-Many games have no interaction data.
-Popularity is likely useful.
-Metadata is necessary for cold or sparse items.
+Low density means collaborative filtering will be sparse.
+Low lyric coverage means lyrics-only recommendation may bias toward older or more popular songs.
+Short playlists make short-term mood estimates unstable.
 ```
 
-For a future music dataset, do the same initial study:
+## 3. Validation
+
+### 3.1 Split
+
+Use playlist-order holdout:
 
 ```text
-number of users
-number of tracks/artists/albums
-number of interactions
-matrix density/sparsity
-average listening history per user
-median listening history
-cold users
-cold tracks
-play count / listening duration distribution
-metadata coverage
-timestamp range
+For each playlist:
+  observed = first 80%
+  heldout  = last 20%
 ```
 
-## 4. Stage 1 Retrieval Workflow
+This matches the proposal and tests playlist continuation.
+
+Do not randomly split tracks inside a playlist unless running a separate ablation, because random split leaks future playlist context into training.
+
+### 3.2 Ground Truth
+
+For each playlist:
+
+```text
+truth = set(heldout songs)
+recommendations must exclude observed songs
+```
+
+### 3.3 Metrics
+
+Recall@K:
+
+```text
+Recall@K = number of heldout songs in top K / number of heldout songs
+```
+
+Use:
+
+```text
+K = 10 for final ranking
+K = 300 for Stage 1 retrieval
+```
+
+NDCG@K:
+
+```text
+DCG@K = sum over relevant recommendations of 1 / log2(rank + 1)
+IDCG@K = best possible DCG for that playlist
+NDCG@K = DCG@K / IDCG@K
+```
+
+Proxy metric for tuning:
+
+```text
+Proxy = (Recall@10 + NDCG@10) / 2
+```
+
+Stage-specific metrics:
+
+```text
+Stage 1: Retrieval@300
+Stage 2: Recall@10, NDCG@10, Proxy
+```
+
+Optional diagnostic metrics:
+
+```text
+catalog coverage = unique recommended tracks / catalog size
+artist diversity = unique recommended artists / recommended items
+popularity bias = average popularity rank of recommendations
+cold-track hit rate = heldout cold tracks recovered / heldout cold tracks
+```
+
+## 4. Stage 1 Candidate Retrieval
 
 ### 4.1 Goal
 
-Stage 1 should retrieve a broad candidate pool.
+Stage 1 should create a broad candidate pool.
 
-The goal is not perfect ranking.
+It does not need perfect ordering.
 
-The goal is:
-
-```text
-Do not miss relevant items.
-Maximize Retrieval@K.
-```
-
-For Steam, K was:
+Primary metric:
 
 ```text
-K = 300
+Retrieval@300
 ```
 
-### 4.2 Steam Stage 1 Routes
-
-We used three Stage 1 signals:
+Definition:
 
 ```text
-content retrieval
-item-CF retrieval
-popularity retrieval
+Retrieval@300 = heldout songs appearing anywhere in candidate pool / heldout songs
 ```
 
-Content route:
+### 4.2 Route A: Lyrics TF-IDF Retrieval
+
+Current no-LLM prototype route.
+
+Algorithm:
 
 ```text
-Build TF-IDF item vectors from metadata.
-Build user content profile from weighted average of historical item vectors.
-Score candidate by cosine similarity.
+1. Tokenize each song lyric.
+2. Compute document frequency per token.
+3. Compute IDF:
+   idf(t) = log((1 + num_songs) / (1 + df(t))) + 1
+4. Build normalized TF-IDF song vector.
+5. Build playlist profile by averaging vectors of observed songs.
+6. Score candidate songs with cosine similarity.
+7. Exclude observed songs.
 ```
 
-Item-CF route:
+Long-term profile:
 
 ```text
-Use interaction data.
-For a user's historical games, find other users who played the same games.
-Recommend other games those users played.
-Normalize co-occurrence by popularity.
+profile_long = average TF-IDF vector of all observed songs
+score_long(candidate) = cosine(profile_long, candidate_vector)
 ```
 
-Popularity route:
+Short-term profile:
 
 ```text
-Use number of users who interacted with each game.
-Helps cold users and sparse histories.
+profile_short = average TF-IDF vector of last N observed songs
+score_short(candidate) = cosine(profile_short, candidate_vector)
 ```
 
-### 4.3 Stage 1 Grid Search
-
-At first, we guessed weights manually.
-
-Initial belief:
+Tune:
 
 ```text
-Item-CF should be strongest because similar players have similar taste.
+min_df
+max_features
+short_window N
+candidate pool size
 ```
 
-But validation showed:
+### 4.3 Route B: Co-Occurrence Collaborative Filtering
+
+Playlist co-occurrence route.
+
+Algorithm:
 
 ```text
-Item-CF-heavy retrieval had lower Retrieval@300.
+1. Treat each playlist as a basket of songs.
+2. For every pair of songs in the same observed playlist, increment co-occurrence count.
+3. Normalize raw counts to reduce popularity domination.
+4. For a target playlist, sum similarities from observed songs to candidate songs.
+5. Exclude observed songs.
 ```
 
-Results:
+Useful similarity options:
+
+Cosine co-occurrence:
 
 ```text
-equal weights:
-  content 0.33, item-CF 0.33, popularity 0.33
-  Retrieval@300 = 0.37114
-
-Item-CF heavy:
-  content 0.30, item-CF 0.70, popularity 0.00
-  Retrieval@300 = 0.33822
-
-grid search:
-  content 0.10, item-CF 0.10, popularity 0.80
-  Retrieval@300 = 0.47831
+sim(i, j) = co_count(i, j) / sqrt(pop(i) * pop(j))
 ```
 
-Lesson:
+PMI:
 
 ```text
-Popularity was not just a fallback.
-It was the strongest Stage 1 recall signal for this dataset.
+pmi(i, j) = log((co_count(i, j) * num_playlists) / (pop(i) * pop(j)))
+ppmi(i, j) = max(pmi(i, j), 0)
 ```
 
-For future music recommendation, do not assume collaborative filtering is automatically best. Test:
+Playlist score:
 
 ```text
-content/audio metadata similarity
-user-track co-listening
-artist/genre popularity
-recent trending popularity
+score_cf(candidate) = sum(sim(candidate, observed_song) for observed_song in playlist)
 ```
 
-Then select Stage 1 weights by:
+Tune:
 
 ```text
-Retrieval@K
+similarity type: raw, cosine, PPMI
+max neighbors per song
+candidate pool size
 ```
 
-## 5. Stage 2 Ranking Workflow
+### 4.4 Route C: Popularity Retrieval
+
+Popularity is a serious baseline, not only a fallback.
+
+Algorithm:
+
+```text
+popularity(song) = number of training playlists containing song
+score_pop(song) = normalized popularity(song)
+```
+
+Use popularity for:
+
+```text
+cold playlists with very few observed songs
+tie breaking
+candidate pool stabilization
+baseline comparison
+```
+
+Avoid overtrusting it:
+
+```text
+High Recall@10 from popularity may indicate dataset popularity bias.
+Check catalog coverage and artist diversity.
+```
+
+### 4.5 Route D: Future LLM Emotion Retrieval
+
+Do not use this until TF-IDF and CF baselines are measured.
+
+Later, use LLM-generated song emotion table:
+
+```text
+song_id
+primary_emotion
+secondary_emotion
+valence
+arousal
+mood_summary
+```
+
+Candidate score:
+
+```text
+recent_mood = average valence/arousal of last N observed songs
+score_emotion(candidate) = cosine(candidate_emotion_vector, recent_mood)
+```
+
+This replaces or augments the current short-term lyrics TF-IDF route.
+
+### 4.6 Stage 1 Fusion
+
+Merge retrieval routes with normalized scores:
+
+```text
+stage1_score =
+  w_lyrics * lyrics_score_norm
++ w_cf     * cf_score_norm
++ w_pop    * popularity_score_norm
+```
+
+Grid search weights by Retrieval@300:
+
+```text
+w_lyrics + w_cf + w_pop = 1
+step = 0.10 for first search
+step = 0.05 for refinement
+```
+
+Report:
+
+```text
+best Stage 1 weights
+Retrieval@300
+average candidate count
+candidate catalog coverage
+```
+
+## 5. Stage 2 Ranking
 
 ### 5.1 Goal
 
-Stage 2 reranks the candidate pool.
+Stage 2 reranks the Stage 1 candidate pool into final top-10 recommendations.
 
-Goal:
-
-```text
-Maximize top-N ranking quality.
-```
-
-For Steam:
+Primary metrics:
 
 ```text
 Recall@10
@@ -314,306 +453,307 @@ NDCG@10
 Proxy = (Recall@10 + NDCG@10) / 2
 ```
 
-### 5.2 Steam Stage 2 Features
+### 5.2 Ranking Features
 
-We engineered five features:
+Start with interpretable features.
+
+Lyrics features:
 
 ```text
-content_score_norm
-itemcf_score_norm
-popularity_norm
-avg_playtime_norm
-tag_overlap
+lyrics_long_norm:
+  normalized cosine similarity to full observed playlist TF-IDF profile
+
+lyrics_short_norm:
+  normalized cosine similarity to last N songs TF-IDF profile
+
+lyrics_delta:
+  lyrics_short_norm - lyrics_long_norm
 ```
 
-Feature meaning:
+Collaborative features:
 
 ```text
-content_score_norm:
-  similarity between user profile and candidate metadata
+cf_score_norm:
+  normalized co-occurrence similarity to observed playlist songs
 
-itemcf_score_norm:
-  co-occurrence / shared-player score
-
-popularity_norm:
-  normalized number of users who interacted with the item
-
-avg_playtime_norm:
-  normalized average playtime for the item
-
-tag_overlap:
-  overlap between user history tags and candidate game tags
+same_artist_count:
+  number of observed songs by candidate artist
 ```
 
-For music, analogous features:
+Popularity features:
 
 ```text
-content_score_norm:
-  similarity between user music profile and track metadata/audio embedding
+track_popularity_norm:
+  normalized playlist-count popularity of candidate track
 
-itemcf_score_norm:
-  co-listening score from users with overlapping listening history
-
-popularity_norm:
-  normalized track/artist popularity
-
-avg_playtime_norm:
-  average listen duration, completion rate, or play count
-
-tag_overlap:
-  overlap between user genre/mood/instrument tags and candidate track tags
+artist_popularity_norm:
+  normalized playlist-count popularity of candidate artist
 ```
 
-### 5.3 Logistic Regression Lesson
-
-We tried Logistic Regression as a learned Stage 2 ranker.
-
-It performed much worse:
+Playlist context features:
 
 ```text
-stage1_fixed_logreg_ranker
-Retrieval@300: 0.47827
-Recall@10:     0.01117
-NDCG@10:       0.00672
-Proxy:         0.00895
+playlist_length
+observed_unique_artists
+short_window_artist_repeat
 ```
 
-Why:
+Future emotion features:
 
 ```text
-Logistic Regression optimizes binary classification loss.
-The assignment evaluates top-10 ranking.
-Negative sampling changes the learning problem.
-Probability calibration does not guarantee good top-10 ordering.
+emotion_similarity:
+  cosine similarity between candidate valence/arousal and recent mood
+
+mood_drift_magnitude:
+  norm(second_half_mood - first_half_mood)
+
+mood_projection_score:
+  similarity to recent_mood + beta * drift_vector
 ```
 
-Lesson:
+### 5.3 Manual Fusion Ranker
+
+Use a weighted ranker before learned models:
 
 ```text
-Do not assume a learned classifier is better.
-If the metric is ranking, tune ranking weights directly when possible.
+final_score =
+  a * lyrics_long_norm
++ b * lyrics_short_norm
++ c * cf_score_norm
++ d * track_popularity_norm
++ e * artist_overlap_norm
 ```
 
-### 5.4 Stage 2 Grid Search
-
-We replaced Logistic Regression with manual Stage 2 grid search.
-
-Equal manual baseline:
+Grid search:
 
 ```text
-content_score_norm 0.20
-itemcf_score_norm  0.20
-popularity_norm    0.20
-avg_playtime_norm  0.20
-tag_overlap        0.20
-
-Proxy = 0.05953
+a + b + c + d + e = 1
+step = 0.20 for first search
+step = 0.10 for refinement
 ```
 
-Best grid-searched Stage 2:
+Select by:
 
 ```text
-content_score_norm 0.00
-itemcf_score_norm  0.20
-popularity_norm    0.20
-avg_playtime_norm  0.20
-tag_overlap        0.40
-
-Proxy = 0.06062
+highest Proxy
+tie-breaker 1: higher Recall@10
+tie-breaker 2: higher NDCG@10
+tie-breaker 3: less popularity bias
 ```
 
-Result:
+### 5.4 Learned Ranker Caution
+
+Learned classifiers are optional later.
+
+Do not assume logistic regression or MLP improves top-10 ranking.
+
+Risks:
 
 ```text
-Stage 2 grid search improved Proxy from 0.05953 to 0.06062.
-Recall@10 increased from 0.06604 to 0.06830.
-NDCG@10 stayed almost the same.
+negative sampling changes the problem
+classification loss does not directly optimize NDCG
+class imbalance is severe
+probability calibration does not guarantee good ranking
+```
+
+If using a learned ranker:
+
+```text
+train only on Stage 1 candidates
+sample negatives from the same candidate pools
+validate by Recall@10 and NDCG@10, not accuracy
+compare against manual fusion
+```
+
+## 6. Experiment Plan
+
+### 6.1 Required Baselines
+
+Run and report:
+
+```text
+Random
+Popularity
+Lyrics TF-IDF long-term
+Lyrics TF-IDF short-term
+Lyrics TF-IDF long/short fusion
+Co-occurrence CF
+Lyrics TF-IDF + CF + popularity
+```
+
+Later LLM variants:
+
+```text
+LLM emotion only
+CF + LLM emotion
+CF + lyrics TF-IDF + LLM emotion
+mood drift ablation
+```
+
+### 6.2 Ablations
+
+Short-term window:
+
+```text
+N = 3, 5, 10
+```
+
+Candidate size:
+
+```text
+K = 100, 300, 500
+```
+
+Lyrics vector settings:
+
+```text
+min_df = 1, 2, 5
+max_features = 10k, 30k, 50k
+```
+
+Fusion:
+
+```text
+alpha from 0.0 to 1.0
+alpha = weight on long-term lyrics profile
+1 - alpha = weight on short-term lyrics profile
+```
+
+CF normalization:
+
+```text
+raw co-count
+cosine
+PPMI
+```
+
+### 6.3 Result Table
+
+Use this table structure:
+
+```text
+Model                         Retrieval@300  Recall@10  NDCG@10  Proxy
+Random                        -              ?          ?        ?
+Popularity                    -              ?          ?        ?
+Lyrics TF-IDF long            ?              ?          ?        ?
+Lyrics TF-IDF short           ?              ?          ?        ?
+Lyrics TF-IDF fusion          ?              ?          ?        ?
+Co-occurrence CF              ?              ?          ?        ?
+Lyrics + CF + popularity      ?              ?          ?        ?
+```
+
+Include data stats above the result table so results are interpretable.
+
+## 7. Cold Start And Bias Checks
+
+### 7.1 Cold Playlists
+
+Definition:
+
+```text
+cold playlist = observed songs <= 3
+```
+
+Handling:
+
+```text
+use lyrics profile if lyrics exist
+use popularity fallback
+avoid overfitting short-term profile from one song
+```
+
+Report:
+
+```text
+Recall@10 for cold playlists
+Recall@10 for non-cold playlists
+```
+
+### 7.2 Cold Tracks
+
+Definition:
+
+```text
+cold track = no training playlist interactions
+```
+
+Handling:
+
+```text
+CF cannot retrieve cold tracks
+lyrics TF-IDF can retrieve cold tracks if lyrics exist
+LLM emotion can retrieve cold tracks later if tags exist
+```
+
+Report:
+
+```text
+cold-track heldout count
+cold-track hit rate
+```
+
+### 7.3 Popularity Bias
+
+Measure:
+
+```text
+average popularity rank of recommendations
+catalog coverage
+artist diversity
 ```
 
 Interpretation:
 
 ```text
-Tag overlap helped find more correct items in the top 10.
-Content score added little in Stage 2 because content was already used in Stage 1.
+If popularity wins but coverage is tiny, the model may be recommending generic hits.
+If lyrics improves coverage while keeping Recall@10 close, that is useful for the report.
 ```
 
-For future music recommendation, tune Stage 2 by validation metric:
+## 8. Implementation Commands
 
-```text
-Fix Stage 1 candidate generation.
-Build Stage 2 features.
-Grid search feature weights.
-Select weights by Recall@N / NDCG@N / Proxy.
+Current data review:
+
+```powershell
+pushd <project-folder>
+python .\newSpotify.py
 ```
 
-## 6. Cold User and Cold Item Handling
+Demo full pipeline:
 
-### 6.1 Cold Users
-
-Cold users have very few interactions.
-
-In Steam:
-
-```text
-cold users = users with <= 3 observed games
+```powershell
+pushd <project-folder>
+python .\newSpotify.py --demo
 ```
 
-Handling:
+Real MPD run after placing playlist slices in `data/`:
 
-```text
-Use whatever history exists to build a content profile.
-Item-CF may be weak because there are few history items.
-Popularity fallback stabilizes recommendation.
-```
-
-For music:
-
-```text
-Use a few listened tracks, artists, genres, or liked songs.
-Back off to popular/trending songs when user history is too short.
-```
-
-### 6.2 Cold Items
-
-Cold items have no training interactions.
-
-In Steam:
-
-```text
-24,096 games had no training interactions.
-```
-
-Handling:
-
-```text
-Item-CF cannot recommend them through co-occurrence.
-Popularity and average playtime are unavailable.
-Metadata-based content retrieval gives them a possible path into the candidate pool.
-But if final Stage 1 is popularity-heavy, cold items may still be hard to rank highly.
-```
-
-For music:
-
-```text
-New songs may have no listens yet.
-Use metadata/audio features:
-  artist
-  album
-  genre
-  mood
-  tempo
-  audio embedding
-  lyrics embedding
-  release date
-```
-
-## 7. Reusable Algorithm Procedure
-
-Use this workflow for the next music recommendation project.
-
-### 7.1 Data Study
-
-1. Count interactions, users, and items.
-2. Compute matrix density and sparsity.
-3. Study user history length distribution.
-4. Study item popularity distribution.
-5. Identify cold users and cold items.
-6. Check metadata coverage.
-7. Check timestamp range and define temporal validation.
-
-### 7.2 Validation Split
-
-Use temporal holdout:
-
-```text
-For each user:
-  hold out latest interactions as validation positives
-  train on earlier interactions
-```
-
-Avoid random split if the task is "what comes next".
-
-### 7.3 Stage 1 Retrieval
-
-Build several retrieval routes:
-
-```text
-content route
-collaborative route
-popularity/trending route
-optional latent route
-```
-
-Merge candidates and tune retrieval weights by:
-
-```text
-Retrieval@K
-```
-
-### 7.4 Stage 2 Ranking
-
-Build at least five features:
-
-```text
-user-side features
-item-side features
-interaction-side features
-retrieval scores
-metadata overlap
-```
-
-Tune Stage 2 by:
-
-```text
-Recall@N
-NDCG@N
-Proxy or assignment metric
-```
-
-### 7.5 Final Submission
-
-After tuning:
-
-```text
-Fix the best Stage 1 weights.
-Fix the best Stage 2 weights.
-Rerun on full training data.
-Generate final submission.
-Validate submission format.
-```
-
-## 8. Commands From This Project
-
-Full Stage 1 and Stage 2 search:
-
-```bat
-cd /d F:\ancserProject\ECS172Steam
-python steam.py --stage1-grid-step 0.10 --stage2-grid-step 0.20
-```
-
-Final faster run after best Stage 1 is known:
-
-```bat
-cd /d F:\ancserProject\ECS172Steam
-python steam.py --stage1-weights 0.10,0.10,0.80 --stage2-grid-step 0.20
-```
-
-Validation-only tuning:
-
-```bat
-cd /d F:\ancserProject\ECS172Steam
-python steam.py --validation-only --stage1-weights 0.10,0.10,0.80 --stage2-grid-step 0.20
+```powershell
+pushd <project-folder>
+python .\newSpotify.py --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 50000 --min-playlist-len 10 --pool-size 300
 ```
 
 ## 9. Final Lesson
 
-The strongest practical lesson:
+The project should progress in this order:
 
 ```text
-Do not trust intuition alone.
-Separate retrieval and ranking.
-Evaluate retrieval with Retrieval@K.
-Evaluate ranking with Recall@N and NDCG@N.
-Tune each stage for its own job.
+1. Verify data and join coverage.
+2. Build measurable lyrics TF-IDF baseline.
+3. Add popularity baseline.
+4. Add co-occurrence CF baseline.
+5. Tune Stage 1 by Retrieval@300.
+6. Tune Stage 2 by Recall@10 and NDCG@10.
+7. Only then add LLM emotion tags and mood drift.
 ```
+
+Strong algorithms are built by separating the jobs:
+
+```text
+data review explains the dataset
+Stage 1 finds enough plausible songs
+Stage 2 orders the best 10
+validation proves whether the change helped
+```
+
+
 
