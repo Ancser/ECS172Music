@@ -331,6 +331,20 @@ def evaluate_rankings(rankings: dict[str, list[str]], cases: list[EvalCase], k: 
     return sum(recalls) / len(recalls), sum(ndcgs) / len(ndcgs)
 
 
+def print_results_table(rows: list[dict[str, float | str]]) -> None:
+    print()
+    print("Results table")
+    print("| Model | Retrieval | Recall | NDCG | Proxy |")
+    print("|---|---:|---:|---:|---:|")
+    for row in rows:
+        retrieval = row["retrieval"]
+        retrieval_text = "-" if retrieval == "" else f"{float(retrieval):.5f}"
+        recall = float(row["recall"])
+        ndcg = float(row["ndcg"])
+        proxy = float(row["proxy"])
+        print(f"| {row['model']} | {retrieval_text} | {recall:.5f} | {ndcg:.5f} | {proxy:.5f} |")
+
+
 def popularity_counts(cases: list[EvalCase]) -> Counter[str]:
     counts: Counter[str] = Counter()
     for case in cases:
@@ -670,6 +684,22 @@ def main() -> None:
     print("Baselines")
     print(f"  random       Recall@{args.top_k}: {random_recall:.5f}  NDCG@{args.top_k}: {random_ndcg:.5f}")
     print(f"  popularity   Recall@{args.top_k}: {pop_recall:.5f}  NDCG@{args.top_k}: {pop_ndcg:.5f}")
+    result_rows: list[dict[str, float | str]] = [
+        {
+            "model": "Random",
+            "retrieval": "",
+            "recall": random_recall,
+            "ndcg": random_ndcg,
+            "proxy": (random_recall + random_ndcg) / 2.0,
+        },
+        {
+            "model": "Popularity",
+            "retrieval": "",
+            "recall": pop_recall,
+            "ndcg": pop_ndcg,
+            "proxy": (pop_recall + pop_ndcg) / 2.0,
+        },
+    ]
 
     alphas: list[float] = []
     value = 0.0
@@ -695,6 +725,15 @@ def main() -> None:
             f"  alpha={alpha:>4.2f}  Retrieval@{args.pool_size}: {retrieval:.5f}  "
             f"Recall@{args.top_k}: {recall:.5f}  NDCG@{args.top_k}: {ndcg:.5f}  Proxy: {proxy:.5f}"
         )
+        result_rows.append(
+            {
+                "model": f"TF-IDF alpha={alpha:.2f}",
+                "retrieval": retrieval,
+                "recall": recall,
+                "ndcg": ndcg,
+                "proxy": proxy,
+            }
+        )
         candidate = (proxy, recall, ndcg, retrieval, alpha, rankings)
         if best is None or candidate[:4] > best[:4]:
             best = candidate
@@ -712,6 +751,16 @@ def main() -> None:
     print(f"  Recall@{args.top_k}:             {recall:.5f}")
     print(f"  NDCG@{args.top_k}:               {ndcg:.5f}")
     print(f"  Proxy:                 {proxy:.5f}")
+    result_rows.append(
+        {
+            "model": f"Best TF-IDF alpha={alpha:.2f}",
+            "retrieval": retrieval,
+            "recall": recall,
+            "ndcg": ndcg,
+            "proxy": proxy,
+        }
+    )
+    print_results_table(result_rows)
     print_example_recs(cases, rankings, songs, limit=5)
 
 

@@ -664,14 +664,14 @@ PPMI
 Use this table structure:
 
 ```text
-Model                         Retrieval@300  Recall@10  NDCG@10  Proxy
-Random                        -              ?          ?        ?
-Popularity                    -              ?          ?        ?
-Lyrics TF-IDF long            ?              ?          ?        ?
-Lyrics TF-IDF short           ?              ?          ?        ?
-Lyrics TF-IDF fusion          ?              ?          ?        ?
-Co-occurrence CF              ?              ?          ?        ?
-Lyrics + CF + popularity      ?              ?          ?        ?
+| Model | Retrieval | Recall | NDCG | Proxy |
+|---|---:|---:|---:|---:|
+| Random | - | ? | ? | ? |
+| Popularity | - | ? | ? | ? |
+| TF-IDF alpha=0.00 | ? | ? | ? | ? |
+| TF-IDF alpha=0.50 | ? | ? | ? | ? |
+| TF-IDF alpha=1.00 | ? | ? | ? | ? |
+| Best TF-IDF alpha=? | ? | ? | ? | ? |
 ```
 
 Include data stats above the result table so results are interpretable.
