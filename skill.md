@@ -32,7 +32,7 @@ After data exists, run the real data review / prototype:
 
 ```powershell
 pushd <project-folder>
-python .\newSpotify.py --mpd-path .\data --lyrics-csv .\data\spotify_millsongdata.csv --holdout-k 10 --min-playlist-len 2 --time-decay 0.9 --progress-interval 1000
+python .\newSpotify.py --mpd-path .\data --lyrics-csv .\data\spotify_millsongdata.csv --max-playlists 1000 --max-eval-cases 1000 --holdout-k 10 --min-playlist-len 2 --time-decay 0.9 --progress-interval 100
 ```
 
 For a quick no-data demo:
@@ -761,7 +761,7 @@ Real MPD run after placing playlist slices in `data/`:
 
 ```powershell
 pushd <project-folder>
-python .\newSpotify.py --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 50000 --min-playlist-len 2 --holdout-k 10 --pool-size 300 --time-decay 0.9 --progress-interval 1000
+python .\newSpotify.py --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --min-playlist-len 2 --holdout-k 10 --pool-size 300 --time-decay 0.9 --max-eval-cases 1000 --progress-interval 100
 ```
 
 ## 9. Final Lesson
@@ -786,6 +786,7 @@ Stage 1 finds enough plausible songs
 Stage 2 orders the best 10
 validation proves whether the change helped
 ```
+
 
 
 

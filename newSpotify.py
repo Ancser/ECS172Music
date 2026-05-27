@@ -549,7 +549,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mpd-path", type=Path, help="MPD JSON file/directory with playlists")
     parser.add_argument("--playlist-csv", type=Path, help="Alternative simple playlist CSV")
     parser.add_argument("--demo", action="store_true", help="Force the tiny built-in demo instead of repo data")
-    parser.add_argument("--max-playlists", type=int, default=50000)
+    parser.add_argument("--max-playlists", type=int, default=1000)
+    parser.add_argument("--max-eval-cases", type=int, default=1000, help="Cap validation playlists after splitting; 0 means no cap")
     parser.add_argument("--min-playlist-len", type=int, default=2)
     parser.add_argument("--holdout-k", type=int, default=10, help="Use up to the last K songs as heldout truth")
     parser.add_argument("--pool-size", type=int, default=300)
@@ -630,6 +631,9 @@ def main() -> None:
     cases = split_playlists(playlists, args.min_playlist_len, args.holdout_k)
     if not cases:
         raise SystemExit("No evaluation playlists after lyrics join/filtering. Lower --min-playlist-len/--holdout-k or check join columns.")
+    if args.max_eval_cases and len(cases) > args.max_eval_cases:
+        print(f"Capping eval playlists from {len(cases):,} to {args.max_eval_cases:,}.")
+        cases = cases[: args.max_eval_cases]
 
     eval_song_ids = {song_id for case in cases for song_id in case.observed + case.heldout}
     songs = {song_id: song for song_id, song in songs.items() if song_id in eval_song_ids}

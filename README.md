@@ -463,7 +463,7 @@ Run data review / real pipeline after playlist slices exist:
 
 ```bat
 pushd <project-folder>
-python .\newSpotify.py --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 50000 --min-playlist-len 2 --holdout-k 10 --pool-size 300 --time-decay 0.9 --progress-interval 1000
+python .\newSpotify.py --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --min-playlist-len 2 --holdout-k 10 --pool-size 300 --time-decay 0.9 --max-eval-cases 1000 --progress-interval 100
 ```
 
 Download playlist data once:
@@ -472,5 +472,6 @@ Download playlist data once:
 pushd <project-folder>
 python .\download.py --playlists
 ```
+
 
 
