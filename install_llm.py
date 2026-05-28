@@ -28,7 +28,7 @@ def module_available(name: str) -> bool:
         return False
 
 
-def ensure_dependencies(cpu_torch: bool) -> None:
+def ensure_dependencies(cpu_torch: bool, cuda_torch: bool) -> None:
     run(
         [
             sys.executable,
@@ -43,7 +43,22 @@ def ensure_dependencies(cpu_torch: bool) -> None:
             "huggingface_hub",
         ]
     )
-    if not module_available("torch"):
+    if cuda_torch:
+        run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--user",
+                "--upgrade",
+                "--force-reinstall",
+                "torch",
+                "--index-url",
+                "https://download.pytorch.org/whl/cu128",
+            ]
+        )
+    elif not module_available("torch"):
         if cpu_torch:
             run(
                 [
@@ -64,10 +79,11 @@ def ensure_dependencies(cpu_torch: bool) -> None:
 
 def prompt_text() -> str:
     return (
-        "Classify the song lyrics for a music recommendation experiment.\n"
-        "Return only compact JSON with keys primary_type, valence, arousal.\n"
-        "primary_type must be one of: love, sadness, energy, anger, calm, hope, nostalgia, neutral.\n"
-        "valence is from -1.0 negative to 1.0 positive. arousal is from 0.0 calm to 1.0 energetic.\n"
+        "Convert this song into a controlled semantic profile for a music recommendation experiment.\n"
+        "Return only one JSON object. Do not output numeric scores.\n"
+        "Schema keys: dominant_emotion, secondary_emotion, valence, arousal, theme_tags, emotion_arc, playlist_role.\n"
+        "Allowed emotions: love, sadness, energy, calm, hope, anger, nostalgia, neutral.\n"
+        "Allowed valence: negative, mixed, positive. Allowed arousal: low, medium, high.\n"
         "Lyrics: I miss you every night, but I still hope the morning brings your smile back.\n"
         "JSON:"
     )
@@ -79,13 +95,15 @@ def download_and_test(model_name: str, cache_dir: Path, device: str) -> None:
     hub_cache.mkdir(parents=True, exist_ok=True)
 
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import pipeline
 
     resolved_device = device
     if resolved_device == "auto":
         resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float16 if resolved_device == "cuda" else torch.float32
-
+    if resolved_device == "cuda" and not torch.cuda.is_available():
+        print("CUDA was requested, but this Python environment has CPU-only PyTorch.")
+        print("Run: python .\\install_llm.py --cuda-torch --device cuda")
+        raise SystemExit(2)
     print(f"HF_HUB_CACHE: {hub_cache}")
     print(f"Model:   {model_name}")
     print(f"Device:  {resolved_device}")
@@ -95,11 +113,10 @@ def download_and_test(model_name: str, cache_dir: Path, device: str) -> None:
         print("Note: this project defaults to the 270M Gemma 3 model for small GPUs.")
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
-        model = AutoModelForCausalLM.from_pretrained(
+        pipe = pipeline(
+            "text-generation",
             model_name,
-            torch_dtype=dtype,
-            low_cpu_mem_usage=True,
+            device=0 if resolved_device == "cuda" else -1,
         )
     except Exception as exc:
         message = str(exc)
@@ -115,20 +132,14 @@ def download_and_test(model_name: str, cache_dir: Path, device: str) -> None:
         print(message[:1200])
         raise SystemExit(2) from exc
 
-    model.to(resolved_device)
-    model.eval()
-    encoded = tokenizer(prompt_text(), return_tensors="pt").to(resolved_device)
-    with torch.no_grad():
-        output = model.generate(
-            **encoded,
-            max_new_tokens=48,
-            do_sample=False,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-    generated = output[0][encoded["input_ids"].shape[-1] :]
+    output = pipe(
+        [{"role": "user", "content": prompt_text()}],
+        max_new_tokens=96,
+        do_sample=False,
+    )
     print()
     print("Smoke test output:")
-    print(tokenizer.decode(generated, skip_special_tokens=True).strip())
+    print(output)
 
 
 def parse_args() -> argparse.Namespace:
@@ -138,13 +149,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--skip-install", action="store_true", help="Only load/test the model; do not pip install dependencies")
     parser.add_argument("--cpu-torch", action="store_true", help="Install torch from the official CPU wheel index if torch is missing")
+    parser.add_argument("--cuda-torch", action="store_true", help="Force reinstall torch from the official CUDA 12.8 wheel index")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     if not args.skip_install:
-        ensure_dependencies(cpu_torch=args.cpu_torch)
+        ensure_dependencies(cpu_torch=args.cpu_torch, cuda_torch=args.cuda_torch)
     download_and_test(args.model, args.cache_dir.resolve(), args.device)
     print()
     print("Gemma LLM ready.")

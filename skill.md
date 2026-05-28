@@ -40,12 +40,13 @@ Optional Gemma 3 LLM setup and small comparison run:
 ```powershell
 pushd <project-folder>
 python -m huggingface_hub.cli.hf auth login
-python .\install_llm.py
-python .\newSpotify.py --emotion-source llm --mpd-path .\data --lyrics-csv .\data\spotify_millsongdata.csv --max-playlists 1000 --max-eval-cases 100 --holdout-k 10 --min-playlist-len 20 --pool-size 100 --alpha-grid-step 0.5 --emotion-limit 200 --progress-interval 25
+python .\install_llm.py --cuda-torch --device cuda
+python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 2 --require-semantic-coverage --mpd-path .\data --lyrics-csv .\data\spotify_millsongdata.csv --max-playlists 1000 --max-eval-cases 100 --holdout-k 10 --min-playlist-len 20 --pool-size 100 --alpha-grid-step 0.5 --emotion-limit 0 --lyrics-weight 0.0 --semantic-weight 0.05 --progress-interval 25
 ```
 
 Default LLM model: `google/gemma-3-270m-it`.
 Use this first because the local GPU memory budget is about 3 GB.
+Use `--require-semantic-coverage --emotion-limit 0` for final LLM runs, because this fails instead of using weak fallback when selected playlist songs are missing semantic profiles. LLM progress should stay readable: one semantic song progress line with cached count, batch size, rate, elapsed time, and ETA. On a 4 GB GPU, start with `--llm-batch-size 2`; lower to `1` if CUDA memory fails.
 
 For a quick no-data demo:
 
@@ -660,10 +661,11 @@ Hybrid CF + metadata + mood + lyrics TF-IDF
 Later LLM variants:
 
 ```text
-LLM emotion only
-CF + LLM emotion
-CF + lyrics TF-IDF + LLM emotion
-CF + Gemma 3 LLM emotion
+LLM semantic labels only
+CF + LLM semantic label match
+CF + lyrics TF-IDF + LLM semantic labels
+CF + Gemma 3 semantic training_text embedding
+CF + Gemma 3 Semantic ID / cluster
 mood drift ablation
 ```
 
@@ -723,6 +725,7 @@ Hybrid llm alpha=0.50                 ?          ?          ?          ?        
 No CF                                 ?          ?          ?          ?          ?          ?          ?
 No mood/drift                         ?          ?          ?          ?          ?          ?          ?
 No metadata                           ?          ?          ?          ?          ?          ?          ?
+No semantic labels                    ?          ?          ?          ?          ?          ?          ?
 No lyrics                             ?          ?          ?          ?          ?          ?          ?
 ```
 
@@ -822,9 +825,11 @@ Gemma 3 LLM run:
 ```powershell
 pushd <project-folder>
 python -m huggingface_hub.cli.hf auth login
-python .\install_llm.py
-python .\newSpotify.py --emotion-source llm --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 100 --alpha-grid-step 0.5 --emotion-limit 200 --progress-interval 25
+python .\install_llm.py --cuda-torch --device cuda
+python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 2 --require-semantic-coverage --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 100 --alpha-grid-step 0.5 --emotion-limit 0 --lyrics-weight 0.0 --semantic-weight 0.05 --progress-interval 25
 ```
+
+LLM semantic progress should report `semantic songs done/total`, cached profiles, batch size, speed, elapsed time, and ETA. Keep warning noise hidden; if a warning appears, treat it as an implementation bug to clean up unless it is an actual model loading failure.
 
 ## 9. Final Lesson
 
