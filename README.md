@@ -684,7 +684,7 @@ python F:\ancserProject\ECS172Music\dataScan.py --workers 8
 Create marked MPD JSON copies once with matched lyrics count and integer coverage percent:
 
 ```bat
-python F:\ancserProject\ECS172Music\dataFilter.py --workers 4
+python F:\ancserProject\ECS172Music\dataMarker.py --workers 4
 ```
 
 This reads original MPD files from `data/` and writes marked copies to `dataMarked/`. It does not modify the original playlist files.
@@ -692,7 +692,7 @@ This reads original MPD files from `data/` and writes marked copies to `dataMark
 Extract filtered playlist-track CSVs:
 
 ```bat
-python F:\ancserProject\ECS172Music\dataExtract.py
+python F:\ancserProject\ECS172Music\dataFilter.py
 ```
 
 This writes:

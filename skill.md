@@ -68,7 +68,7 @@ Use `python F:\ancserProject\ECS172Music\dataScan.py --max-playlists 1000` for a
 To cache coverage into marked MPD JSON copies once:
 
 ```powershell
-python F:\ancserProject\ECS172Music\dataFilter.py --workers 4
+python F:\ancserProject\ECS172Music\dataMarker.py --workers 4
 ```
 
 This reads original MPD JSON from `data/` and writes marked copies to `dataMarked/`; it must not modify original playlist data. It adds integer fields `matched_song_count` and `matched_coverage_percent` to each playlist object. Use `--dry-run --max-files 1` before a full write if testing.
@@ -76,7 +76,7 @@ This reads original MPD JSON from `data/` and writes marked copies to `dataMarke
 To extract filtered playlist-track CSV files:
 
 ```powershell
-python F:\ancserProject\ECS172Music\dataExtract.py
+python F:\ancserProject\ECS172Music\dataFilter.py
 ```
 
 This reads `dataMarked/` by default and creates `dataFiltered/playlists_50songs_50coverage.csv`, `dataFiltered/playlists_50songs.csv`, and `dataFiltered/playlists_50coverage.csv`.
