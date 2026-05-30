@@ -1,4 +1,4 @@
-﻿# Music Recommendation Algorithm Workflow Skill
+# Music Recommendation Algorithm Workflow Skill
 
 ## 0. Response Rule And First Run
 
@@ -41,12 +41,12 @@ Optional Gemma 3 LLM setup and small comparison run:
 pushd <project-folder>
 python -m huggingface_hub.cli.hf auth login
 python .\install_llm.py --cuda-torch --device cuda
-python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 10 --require-semantic-coverage --mpd-path .\data --lyrics-csv .\data\spotify_millsongdata.csv --max-playlists 1000 --max-eval-cases 100 --holdout-k 10 --min-playlist-len 20 --pool-size 200 --emotion-limit 0 --semantic-weight 0.15 --progress-interval 25
+python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 20 --require-semantic-coverage --mpd-path .\data --lyrics-csv .\data\spotify_millsongdata.csv --max-playlists 1000 --max-eval-cases 100 --holdout-k 10 --min-playlist-len 20 --pool-size 200 --emotion-limit 0 --semantic-weight 0.15 --progress-interval 25
 ```
 
 Default LLM model: `google/gemma-3-270m-it`.
 Use this first because the local GPU memory budget is about 3 GB.
-Use `--require-semantic-coverage --emotion-limit 0` for final LLM runs, because this fails instead of comparing unprocessed songs semantically when selected playlist songs are missing structured semantic profiles. Raw lyrics should not be compared directly in the hybrid LLM path. LLM progress should stay readable: one semantic song progress line with cached count, batch size, rate, elapsed time, and ETA. On the local 4 GB GPU, batch 10 worked; lower it if CUDA memory fails.
+Use `--require-semantic-coverage --emotion-limit 0` for final LLM runs, because this fails instead of comparing unprocessed songs semantically when selected playlist songs are missing structured semantic profiles. Raw lyrics should not be compared directly in the hybrid LLM path. LLM progress should stay readable: one semantic song progress line with cached count, batch size, rate, elapsed time, and ETA. On the local 4 GB GPU, batch 20 worked; lower it if CUDA memory fails.
 
 For the local Spotify-style web demo:
 
@@ -55,7 +55,16 @@ pushd <project-folder>
 .\start_spotify_web.bat
 ```
 
-Default web recommendation controls are `batch=10` and `candidates=200`, because the local GPU handled batch 10 well and candidate 200 better demonstrates the two-stage retrieval/reranking design.
+Default web recommendation controls are `batch=20` and `candidates=200`, because the local GPU handled batch 20 well and candidate 200 better demonstrates the two-stage retrieval/reranking design.
+
+For data coverage review:
+
+```powershell
+pushd <project-folder>
+.\dataScan.cmd
+```
+
+Use `.\dataScan.cmd --max-playlists 1000` for a quick sample. The scan should report MPD track coverage against the lyrics catalog as `(matched/total) percent`, playlist full/partial/zero-match counts, and playlist length bar charts for original MPD length and matched-song count.
 
 For a quick no-data demo:
 
@@ -828,7 +837,7 @@ Gemma 3 LLM run:
 pushd <project-folder>
 python -m huggingface_hub.cli.hf auth login
 python .\install_llm.py --cuda-torch --device cuda
-python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 10 --require-semantic-coverage --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --emotion-limit 0 --semantic-weight 0.15 --progress-interval 25
+python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 20 --require-semantic-coverage --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --emotion-limit 0 --semantic-weight 0.15 --progress-interval 25
 ```
 
 LLM semantic progress should report `semantic songs done/total`, cached profiles, batch size, speed, elapsed time, and ETA. Keep warning noise hidden; if a warning appears, treat it as an implementation bug to clean up unless it is an actual model loading failure.

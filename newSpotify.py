@@ -1415,7 +1415,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--emotion-max-chars", type=int, default=1200)
     parser.add_argument("--emotion-limit", type=int, default=0, help="Only tag this many missing songs; 0 means all missing songs")
     parser.add_argument("--llm-max-new-tokens", type=int, default=320)
-    parser.add_argument("--llm-batch-size", type=int, default=1, help="Batch LLM semantic profiling prompts; try 2 on 4GB GPUs")
+    parser.add_argument("--llm-batch-size", type=int, default=20, help="Batch LLM semantic profiling prompts; lower this if CUDA memory fails")
     parser.add_argument("--llm-debug-output", type=int, default=0, help="Print raw LLM output for the first N newly profiled songs")
     parser.add_argument("--require-semantic-coverage", action="store_true", help="Fail instead of using weak fallback if any selected eval song lacks LLM semantic profile")
     parser.add_argument("--llm-model", default=DEFAULT_LLM_MODEL)

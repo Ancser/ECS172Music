@@ -1,4 +1,4 @@
-﻿# ECS172 Music Recommendation Project
+# ECS172 Music Recommendation Project
 
 ## 1. Project Direction
 
@@ -506,10 +506,10 @@ Use `--llm-device cuda` after CUDA PyTorch is installed:
 
 ```bat
 pushd <project-folder>
-python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 10 --require-semantic-coverage --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --emotion-limit 0 --semantic-weight 0.15 --progress-interval 25
+python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 20 --require-semantic-coverage --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --emotion-limit 0 --semantic-weight 0.15 --progress-interval 25
 ```
 
-For pilot runs, keep `--emotion-limit` small and omit `--require-semantic-coverage`. For final LLM semantic experiments, use `--emotion-limit 0 --require-semantic-coverage` so every selected eval song has a structured semantic profile. Cached profiles are reused on later runs. The current semantic cache uses `structured_semantic_v3`, which stores structured semantic text and does not reuse older raw emotion caches. Raw lyrics are not directly compared in the current console hybrid path; Stage 1 uses CF + popularity candidates, and Stage 2 reranks with metadata, weak mood, and structured semantic-text similarity only where profiles exist. LLM profiling output is kept to one clear semantic progress line with rate, elapsed time, and ETA. On a 4 GB GPU, batch 10 worked locally; if CUDA runs out of memory, lower it.
+For pilot runs, keep `--emotion-limit` small and omit `--require-semantic-coverage`. For final LLM semantic experiments, use `--emotion-limit 0 --require-semantic-coverage` so every selected eval song has a structured semantic profile. Cached profiles are reused on later runs. The current semantic cache uses `structured_semantic_v3`, which stores structured semantic text and does not reuse older raw emotion caches. Raw lyrics are not directly compared in the current console hybrid path; Stage 1 uses CF + popularity candidates, and Stage 2 reranks with metadata, weak mood, and structured semantic-text similarity only where profiles exist. LLM profiling output is kept to one clear semantic progress line with rate, elapsed time, and ETA. On a 4 GB GPU, batch 20 worked locally; if CUDA runs out of memory, lower it.
 
 Later embedding table:
 
@@ -661,6 +661,20 @@ Download playlist data once:
 ```bat
 pushd <project-folder>
 python .\download_data.py --playlists
+```
+
+Scan MPD playlist coverage against the lyrics catalog:
+
+```bat
+pushd <project-folder>
+.\dataScan.cmd
+```
+
+For a faster sample scan:
+
+```bat
+pushd <project-folder>
+.\dataScan.cmd --max-playlists 1000
 ```
 
 
