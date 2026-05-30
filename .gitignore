@@ -2,3 +2,4 @@
 /models/
 __pycache__/
 *.pyc
+/_pdf_pages

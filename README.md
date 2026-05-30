@@ -19,12 +19,12 @@ The final system should combine:
 - short-term mood from recent lyric/emotion trajectory
 - adaptive fusion between long-term and short-term signals
 
-Current implementation intentionally starts simpler:
+Current implementation has two paths:
 
 ```text
-No LLM yet.
-Use lyrics TF-IDF/content-IDF, co-occurrence CF, metadata, and weak lyric-emotion rules first.
-Measure baselines before adding emotion tags or learned models.
+Baseline path: CF + popularity + metadata + weak mood.
+LLM path: CF + popularity candidates, then structured semantic-text reranking.
+Raw lyrics are not directly compared in the current LLM hybrid path.
 ```
 
 Core workflow:
@@ -43,6 +43,8 @@ data review
 newSpotify.py      main prototype and evaluator
 download_data.py   one-time Kaggle data downloader
 install_llm.py     optional Gemma 3 LLM downloader/tester
+spotify_web.py     local browser demo for playlist continuation
+start_spotify_web.bat  Windows launcher for the web demo
 skill.md           detailed algorithm workflow notes
 SPEC.md            pointer to this README
 data/              local datasets
@@ -84,7 +86,66 @@ The lyrics CSV is already in:
 data/spotify_millsongdata.csv
 ```
 
-## 4. Data Review
+## 4. Local Spotify Web Demo
+
+Launch the browser prototype:
+
+```bat
+pushd <project-folder>
+start_spotify_web.bat
+```
+
+The web app opens at `http://127.0.0.1:5050`. It indexes lyrics and MPD playlists into `models/web_cache/spotify_web.sqlite`. The first full index can take a while because the Spotify Million Playlist Dataset is large; later launches reuse the SQLite cache.
+
+For a faster classroom/demo index:
+
+```bat
+pushd <project-folder>
+start_spotify_web.bat --max-playlists 50000 --rebuild
+```
+
+Default web recommendation controls:
+
+```text
+batch size: 10
+candidates: 200
+```
+
+This means Stage 1 retrieves 200 non-LLM candidates before Stage 2 runs LLM structured semantic text and reranks the final top 10.
+
+The page supports:
+
+```text
+Overview and Recommendation tabs
+playlist/users list with 5+, 10+, and 50+ filters
+compact song list with search, random sampling, and hover JSON details
+data overview before recommendation, including sparsity, playlist year range, language, and lyric type
+playlist detail view with first 10 songs hidden/gray for evaluation
+Train / recommend button that uses song 11 onward as observed history
+background progress for candidate generation and LLM structured semantic text
+final recommendation table with CF, singer recency, title/context, popularity, and semantic-text scores
+```
+
+The web LLM path intentionally does not use raw emotion labels. It asks Gemma to generate structured semantic text, caches it, embeds the text with TF-IDF, and uses it as an auxiliary ranking feature beside CF and popularity.
+
+The web ranking formula explicitly includes artist/singer and title context, but weights are adaptive per playlist:
+
+```text
+Stage 1:
+  CF + popularity retrieve candidates from the full catalog.
+
+Stage 2:
+  LLM structured semantic text is generated only for observed playlist songs
+  and candidate songs, then the final top-10 is reranked.
+
+Adaptive playlist personalities:
+  singer-led          -> higher singer-recency weight
+  playlist-title-led  -> higher playlist-title / song-title context weight
+  style-led           -> higher lyric type and semantic-text weight
+  mixed-personal      -> higher CF weight
+```
+
+## 5. Data Review
 
 Always review data before modeling.
 
@@ -191,35 +252,29 @@ love, sadness, energy, anger, calm, hope, nostalgia, other
 
 These are placeholders for later LLM emotion tags.
 
-### Route A: Lyrics TF-IDF
+### Route A: Structured Semantic Text
 
-Current implemented no-LLM route.
+Current implemented LLM route. Raw lyrics are only used as input to produce a cached structured semantic profile; they are not directly compared during hybrid ranking.
 
 Algorithm:
 
 ```text
-1. Tokenize lyrics.
-2. Compute document frequency per token.
-3. Compute IDF:
+1. Generate or load a structured semantic profile per song.
+2. Generate deterministic training_text from structured fields.
+3. Tokenize training_text, not raw lyrics.
+4. Compute document frequency per token.
    idf(t) = log((1 + num_songs) / (1 + df(t))) + 1
-4. Build normalized TF-IDF vector per song.
-5. Average observed-song vectors into playlist profile.
-6. Score candidate songs by cosine similarity.
-7. Exclude observed songs.
+5. Build normalized semantic-text vector per processed song.
+6. Stage 1 retrieves candidates with CF + popularity.
+7. Stage 2 scores only processed semantic candidates by cosine similarity.
+8. Exclude observed songs.
 ```
 
-Long-term profile:
+Recent semantic profile:
 
 ```text
-profile_long = time-decayed average TF-IDF vector of all observed songs
-score_long(candidate) = cosine(profile_long, candidate_vector)
-```
-
-Short-term profile:
-
-```text
-profile_short = time-decayed average TF-IDF vector of last N observed songs
-score_short(candidate) = cosine(profile_short, candidate_vector)
+profile_recent = time-decayed average semantic-text vector of last N observed songs with profiles
+score_semantic(candidate) = cosine(profile_recent, candidate_semantic_vector)
 ```
 
 Time decay:
@@ -235,7 +290,7 @@ Cold-start shortcut:
 
 ```text
 if observed length <= cold_start_threshold:
-  skip TF-IDF profile scoring
+  skip CF profile scoring
   rank candidates with popularity fallback
 default cold_start_threshold = 1
 ```
@@ -244,7 +299,7 @@ Speedup:
 
 ```text
 candidate scores are prepared once
-alpha sweep reuses cached long/short/popularity scores
+semantic reranking reuses cached CF/popularity candidates
 progress prints every --progress-interval eval playlists
 ```
 
@@ -424,38 +479,37 @@ Cached fields:
 ```text
 song_id
 language
-dominant_emotion
-secondary_emotion
-valence
-arousal
-theme_tags
-emotion_arc
-playlist_role
+semantic_summary
+themes
+lyrical_narrative
+listening_context
+playlist_function
+transition_note
+keywords
 training_text
 ```
 
-The LLM is not allowed to output numeric emotion scores or recommendations. It only chooses from controlled labels. `training_text` is generated by code:
+The LLM is not allowed to output numeric emotion scores or recommendations. It returns compact structured meaning fields. `training_text` is generated by code:
 
 ```text
-A {arousal}-arousal {valence}-valence song about {theme1}, {theme2}, and {theme3},
-expressing {dominant_emotion} and {secondary_emotion}, suitable to {playlist_role}.
+Semantic profile: themes=...; narrative=...; context=...; playlist_function=...; transition=...; keywords=....
 ```
 
 Run a small Gemma comparison first:
 
 ```bat
 pushd <project-folder>
-python .\newSpotify.py --emotion-source llm --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 100 --alpha-grid-step 0.5 --emotion-limit 200 --progress-interval 25
+python .\newSpotify.py --emotion-source llm --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --emotion-limit 200 --semantic-weight 0.15 --progress-interval 25
 ```
 
 Use `--llm-device cuda` after CUDA PyTorch is installed:
 
 ```bat
 pushd <project-folder>
-python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 2 --require-semantic-coverage --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 100 --alpha-grid-step 0.5 --emotion-limit 0 --lyrics-weight 0.0 --semantic-weight 0.05 --progress-interval 25
+python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 10 --require-semantic-coverage --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --emotion-limit 0 --semantic-weight 0.15 --progress-interval 25
 ```
 
-For pilot runs, keep `--emotion-limit` small and omit `--require-semantic-coverage`. For final LLM semantic experiments, use `--emotion-limit 0 --require-semantic-coverage` so every selected eval song has a semantic profile. Cached profiles are reused on later runs. The current semantic cache uses `semantic_v2`, which is schema-only and does not reuse older raw emotion caches. LLM profiling output is kept to one clear semantic progress line with rate, elapsed time, and ETA. On a 4 GB GPU, start with `--llm-batch-size 2`; if CUDA runs out of memory, lower it to `1`.
+For pilot runs, keep `--emotion-limit` small and omit `--require-semantic-coverage`. For final LLM semantic experiments, use `--emotion-limit 0 --require-semantic-coverage` so every selected eval song has a structured semantic profile. Cached profiles are reused on later runs. The current semantic cache uses `structured_semantic_v3`, which stores structured semantic text and does not reuse older raw emotion caches. Raw lyrics are not directly compared in the current console hybrid path; Stage 1 uses CF + popularity candidates, and Stage 2 reranks with metadata, weak mood, and structured semantic-text similarity only where profiles exist. LLM profiling output is kept to one clear semantic progress line with rate, elapsed time, and ETA. On a 4 GB GPU, batch 10 worked locally; if CUDA runs out of memory, lower it.
 
 Later embedding table:
 
@@ -470,7 +524,7 @@ Prompt target:
 
 ```text
 Given lyrics, return JSON with:
-dominant_emotion, secondary_emotion, valence, arousal, theme_tags, emotion_arc, playlist_role
+semantic_summary, themes, lyrical_narrative, listening_context, playlist_function, transition_note, keywords
 ```
 
 Short-term mood algorithm:
@@ -496,20 +550,14 @@ Required baselines:
 ```text
 Random
 Popularity
-Lyrics TF-IDF long-term
-Lyrics TF-IDF short-term
-Lyrics TF-IDF long/short fusion
 Co-occurrence CF
 CF + popularity baseline
-Hybrid CF + metadata + mood + lyrics TF-IDF
+Hybrid CF + metadata + mood + structured semantic text
 ```
 
 Later LLM variants:
 
 ```text
-LLM semantic labels only
-CF + LLM semantic label match
-CF + lyrics TF-IDF + LLM semantic labels
 CF + Gemma 3 semantic training_text embedding
 CF + Gemma 3 Semantic ID / cluster
 with vs without mood drift
@@ -537,19 +585,16 @@ Model                         Retrieval     Recall    dRecall       NDCG      dN
 Random                                -          ?          ?          ?          ?          ?          ?
 Popularity                            -          ?          ?          ?          ?          ?          ?
 CF + popularity baseline              ?          ?   +0.00000          ?   +0.00000          ?   +0.00000
-Hybrid alpha=0.00                     ?          ?          ?          ?          ?          ?          ?
-Hybrid alpha=0.50                     ?          ?          ?          ?          ?          ?          ?
-Hybrid alpha=1.00                     ?          ?          ?          ?          ?          ?          ?
-Best Hybrid alpha=?                   ?          ?          ?          ?          ?          ?          ?
-Hybrid llm alpha=0.50                 ?          ?          ?          ?          ?          ?          ?
+Hybrid structured semantic            ?          ?          ?          ?          ?          ?          ?
+Best Hybrid structured semantic       ?          ?          ?          ?          ?          ?          ?
 No CF                                 ?          ?          ?          ?          ?          ?          ?
 No mood/drift                         ?          ?          ?          ?          ?          ?          ?
 No metadata                           ?          ?          ?          ?          ?          ?          ?
-No lyrics                             ?          ?          ?          ?          ?          ?          ?
+No structured semantic                ?          ?          ?          ?          ?          ?          ?
 ```
 
 `dRecall`, `dNDCG`, and `dProxy` are measured against `CF + popularity baseline`.
-Positive values mean the added lyric, metadata, or emotion signal helped over the strongest simple recommender.
+Positive values mean the added metadata, weak mood, or structured semantic signal helped over the strongest simple recommender.
 Negative values mean that signal hurt ranking accuracy on that run.
 
 ## 10. Report Direction
@@ -608,7 +653,7 @@ Install and run the smallest Gemma 3 LLM comparison:
 pushd <project-folder>
 python -m huggingface_hub.cli.hf auth login
 python .\install_llm.py
-python .\newSpotify.py --emotion-source llm --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 100 --alpha-grid-step 0.5 --emotion-limit 200 --progress-interval 25
+python .\newSpotify.py --emotion-source llm --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --emotion-limit 200 --semantic-weight 0.15 --progress-interval 25
 ```
 
 Download playlist data once:

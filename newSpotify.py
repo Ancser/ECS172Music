@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Lyrics TF-IDF playlist-continuation prototype.
+"""CF + structured semantic text playlist-continuation prototype.
 
 This is the first implementation slice for the ECS172 music project:
-- no LLM calls
-- lyrics are represented with TF-IDF/content-IDF vectors
+- optional Gemma LLM calls only create cached structured song profiles
+- raw lyrics are not directly compared in the hybrid LLM ranking path
+- structured semantic text is represented with TF-IDF/content-IDF vectors
 - each playlist uses earlier songs as input and the last 10 songs as heldout truth
 - recommendations are evaluated with Recall@10 and NDCG@10
 
@@ -128,13 +129,10 @@ class PreparedCase:
     playlist_id: str
     heldout: list[str]
     candidates: set[str]
-    long_norm: dict[str, float]
-    short_norm: dict[str, float]
     cf_norm: dict[str, float]
     artist_norm: dict[str, float]
     type_norm: dict[str, float]
     language_norm: dict[str, float]
-    mood_norm: dict[str, float]
     semantic_norm: dict[str, float]
     pop_norm: dict[str, float]
     retrieval: float
@@ -152,14 +150,15 @@ class SongFeature:
 @dataclass(frozen=True)
 class SemanticProfile:
     language: str
-    dominant_emotion: str
-    secondary_emotion: str
-    valence: str
-    arousal: str
-    theme_tags: tuple[str, str, str]
-    emotion_arc: str
-    playlist_role: str
+    semantic_summary: str
+    themes: tuple[str, str, str]
+    lyrical_narrative: str
+    listening_context: str
+    playlist_function: str
+    transition_note: str
+    keywords: tuple[str, str, str, str, str]
     training_text: str
+    source: str = "llm"
 
 
 def normalize_text(value: str) -> str:
@@ -235,33 +234,29 @@ def emotion_cache_path(cache_dir: Path, model_name: str) -> Path:
 
 def semantic_cache_path(cache_dir: Path, model_name: str) -> Path:
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "__", model_name)
-    return cache_dir / f"{safe_name}__semantic_v2.csv"
+    return cache_dir / f"{safe_name}__structured_semantic_v4.csv"
 
 
 def fixed_training_text(profile: SemanticProfile) -> str:
-    theme1, theme2, theme3 = profile.theme_tags
     return (
-        f"A {profile.arousal}-arousal {profile.valence}-valence song about "
-        f"{theme1}, {theme2}, and {theme3}, expressing "
-        f"{profile.dominant_emotion} and {profile.secondary_emotion}, "
-        f"suitable to {profile.playlist_role.replace('_', ' ')}."
+        f"Semantic profile: themes={', '.join(profile.themes)}; "
+        f"narrative={profile.lyrical_narrative}; "
+        f"context={profile.listening_context}; "
+        f"playlist_function={profile.playlist_function}; "
+        f"transition={profile.transition_note}; "
+        f"keywords={', '.join(profile.keywords)}."
     )
 
 
 def profile_to_feature(profile: SemanticProfile) -> SongFeature:
-    dominant = EMOTION_VECTOR.get(profile.dominant_emotion, EMOTION_VECTOR["neutral"])
-    secondary = EMOTION_VECTOR.get(profile.secondary_emotion, EMOTION_VECTOR["neutral"])
-    valence = 0.7 * dominant[0] + 0.3 * secondary[0]
-    arousal = 0.7 * dominant[1] + 0.3 * secondary[1]
-    valence_adjust = {"negative": -0.25, "mixed": 0.0, "positive": 0.25}[profile.valence]
-    arousal_adjust = {"low": -0.20, "medium": 0.0, "high": 0.20}[profile.arousal]
-    valence = max(-1.0, min(1.0, valence + valence_adjust))
-    arousal = max(0.0, min(1.0, arousal + arousal_adjust))
+    # Structured semantic profiles are not raw emotion labels. Keep numerical
+    # mood/type features on the weak lexical path and use profiles only for
+    # semantic-text matching.
     return SongFeature(
         language=profile.language,
-        primary_type=profile.dominant_emotion,
-        valence=valence,
-        arousal=arousal,
+        primary_type="semantic",
+        valence=0.0,
+        arousal=0.35,
     )
 
 
@@ -275,31 +270,25 @@ def read_semantic_profile_cache(path: Path) -> dict[str, SemanticProfile]:
             song_id = row.get("song_id", "")
             if not song_id:
                 continue
-            themes = tuple((row.get("theme_tags", "") or "").split("|")[:3])
+            themes = tuple((row.get("themes", "") or "").split("|")[:3])
+            keywords = tuple((row.get("keywords", "") or "").split("|")[:5])
             if len(themes) != 3:
                 continue
+            if len(keywords) != 5:
+                keywords = ("relationship", "memory", "movement", "reflection", "playlist flow")
             profile = SemanticProfile(
                 language=row.get("language", "unknown"),
-                dominant_emotion=row.get("dominant_emotion", "neutral"),
-                secondary_emotion=row.get("secondary_emotion", "neutral"),
-                valence=row.get("valence", "mixed"),
-                arousal=row.get("arousal", "medium"),
-                theme_tags=(themes[0], themes[1], themes[2]),
-                emotion_arc=row.get("emotion_arc", "steady mood"),
-                playlist_role=row.get("playlist_role", "continue_mood"),
+                semantic_summary=row.get("semantic_summary", ""),
+                themes=(themes[0], themes[1], themes[2]),
+                lyrical_narrative=row.get("lyrical_narrative", ""),
+                listening_context=row.get("listening_context", ""),
+                playlist_function=row.get("playlist_function", ""),
+                transition_note=row.get("transition_note", ""),
+                keywords=(keywords[0], keywords[1], keywords[2], keywords[3], keywords[4]),
                 training_text=row.get("training_text", ""),
+                source=row.get("source", "llm"),
             )
-            cached[song_id] = SemanticProfile(
-                language=profile.language,
-                dominant_emotion=profile.dominant_emotion if profile.dominant_emotion in ALLOWED_EMOTIONS else "neutral",
-                secondary_emotion=profile.secondary_emotion if profile.secondary_emotion in ALLOWED_EMOTIONS else "neutral",
-                valence=profile.valence if profile.valence in ALLOWED_VALENCE else "mixed",
-                arousal=profile.arousal if profile.arousal in ALLOWED_AROUSAL else "medium",
-                theme_tags=tuple(tag if tag in ALLOWED_THEME_TAGS else "comfort" for tag in profile.theme_tags),  # type: ignore[arg-type]
-                emotion_arc=profile.emotion_arc,
-                playlist_role=profile.playlist_role if profile.playlist_role in ALLOWED_PLAYLIST_ROLES else "continue_mood",
-                training_text=profile.training_text or fixed_training_text(profile),
-            )
+            cached[song_id] = normalize_semantic_profile(profile, language=profile.language, source=profile.source)
     return cached
 
 
@@ -311,14 +300,15 @@ def write_semantic_profile_cache(path: Path, profiles: dict[str, SemanticProfile
             fieldnames=[
                 "song_id",
                 "language",
-                "dominant_emotion",
-                "secondary_emotion",
-                "valence",
-                "arousal",
-                "theme_tags",
-                "emotion_arc",
-                "playlist_role",
+                "semantic_summary",
+                "themes",
+                "lyrical_narrative",
+                "listening_context",
+                "playlist_function",
+                "transition_note",
+                "keywords",
                 "training_text",
+                "source",
             ],
         )
         writer.writeheader()
@@ -327,46 +317,125 @@ def write_semantic_profile_cache(path: Path, profiles: dict[str, SemanticProfile
                 {
                     "song_id": song_id,
                     "language": profile.language,
-                    "dominant_emotion": profile.dominant_emotion,
-                    "secondary_emotion": profile.secondary_emotion,
-                    "valence": profile.valence,
-                    "arousal": profile.arousal,
-                    "theme_tags": "|".join(profile.theme_tags),
-                    "emotion_arc": profile.emotion_arc,
-                    "playlist_role": profile.playlist_role,
+                    "semantic_summary": profile.semantic_summary,
+                    "themes": "|".join(profile.themes),
+                    "lyrical_narrative": profile.lyrical_narrative,
+                    "listening_context": profile.listening_context,
+                    "playlist_function": profile.playlist_function,
+                    "transition_note": profile.transition_note,
+                    "keywords": "|".join(profile.keywords),
                     "training_text": fixed_training_text(profile),
+                    "source": profile.source,
                 }
             )
 
-def clean_choice(value: object, allowed: tuple[str, ...], default: str) -> str:
-    cleaned = normalize_text(str(value or "")).replace(" ", "_")
-    return cleaned if cleaned in allowed else default
+def clean_phrase(value: object, max_words: int = 8) -> str:
+    words = re.findall(r"[A-Za-z][A-Za-z0-9'_-]*", str(value or "").lower())
+    cleaned = [word.strip("'_-") for word in words[:max_words]]
+    return " ".join(word for word in cleaned if word).strip()
 
 
-def clean_emotion_arc(value: object) -> str:
-    words = re.findall(r"[A-Za-z][A-Za-z_-]*", str(value or "").lower())[:12]
-    return " ".join(words) if words else "steady mood"
-
-
-def parse_theme_tags(value: object) -> tuple[str, str, str]:
-    tags: list[str] = []
+def clean_phrase_list(value: object, length: int, fallback: list[str]) -> tuple[str, ...]:
+    items: list[str] = []
     if isinstance(value, list):
         raw_items = value
     else:
         raw_items = re.split(r"[,|;/]+", str(value or ""))
     for item in raw_items:
-        tag = clean_choice(item, ALLOWED_THEME_TAGS, "")
-        if tag and tag not in tags:
-            tags.append(tag)
-    for fallback in ("romance", "memory", "healing"):
-        if len(tags) >= 3:
+        phrase = clean_phrase(item, max_words=4)
+        if phrase and phrase not in items:
+            items.append(phrase)
+    for phrase in fallback:
+        cleaned = clean_phrase(phrase, max_words=4)
+        if len(items) >= length:
             break
-        if fallback not in tags:
-            tags.append(fallback)
-    return tags[0], tags[1], tags[2]
+        if cleaned and cleaned not in items:
+            items.append(cleaned)
+    return tuple(items[:length])
 
 
-def parse_llm_semantic_profile(text: str, language: str) -> SemanticProfile:
+def normalize_semantic_profile(payload: object, language: str, source: str = "llm") -> SemanticProfile:
+    if isinstance(payload, SemanticProfile):
+        raw = {
+            "semantic_summary": payload.semantic_summary,
+            "themes": payload.themes,
+            "lyrical_narrative": payload.lyrical_narrative,
+            "listening_context": payload.listening_context,
+            "playlist_function": payload.playlist_function,
+            "transition_note": payload.transition_note,
+            "keywords": payload.keywords,
+        }
+    elif isinstance(payload, dict):
+        raw = payload
+    else:
+        raw = {}
+    keywords = clean_phrase_list(raw.get("keywords"), 5, ["relationship", "memory", "movement", "reflection", "playlist flow"])
+    themes = clean_phrase_list(raw.get("themes"), 3, list(keywords[:3]) or ["relationship", "memory", "reflection"])
+    summary = clean_phrase(raw.get("semantic_summary", raw.get("summary")), max_words=16)
+    narrative = clean_phrase(raw.get("lyrical_narrative"), max_words=18)
+    context = clean_phrase(raw.get("listening_context"), max_words=12)
+    function = clean_phrase(raw.get("playlist_function"), max_words=12)
+    transition = clean_phrase(raw.get("transition_note"), max_words=14)
+    if not summary:
+        summary = f"{themes[0]} and {themes[1]} oriented playlist continuation"
+    if not narrative:
+        narrative = f"lyrics focus on {', '.join(themes)}"
+    if not context:
+        context = "general listening sequence"
+    if not function:
+        function = "continue related playlist context"
+    if not transition:
+        transition = "connect when recent songs share topic or singer"
+    profile = SemanticProfile(
+        language=language,
+        semantic_summary=summary,
+        themes=(themes[0], themes[1], themes[2]),  # type: ignore[index]
+        lyrical_narrative=narrative,
+        listening_context=context,
+        playlist_function=function,
+        transition_note=transition,
+        keywords=(keywords[0], keywords[1], keywords[2], keywords[3], keywords[4]),  # type: ignore[index]
+        training_text="",
+        source=str(raw.get("source", source)),
+    )
+    return SemanticProfile(
+        language=profile.language,
+        semantic_summary=profile.semantic_summary,
+        themes=profile.themes,
+        lyrical_narrative=profile.lyrical_narrative,
+        listening_context=profile.listening_context,
+        playlist_function=profile.playlist_function,
+        transition_note=profile.transition_note,
+        keywords=profile.keywords,
+        training_text=fixed_training_text(profile),
+        source=profile.source,
+    )
+
+
+def fallback_semantic_profile(song: Song, language: str) -> SemanticProfile:
+    tokens = [
+        token
+        for token in tokenize(f"{song.title} {song.artist} {song.lyrics}")
+        if len(token) > 2 and token not in STOPWORDS
+    ]
+    counts = Counter(tokens)
+    top_words = [word for word, _ in counts.most_common(8)]
+    while len(top_words) < 8:
+        top_words.append(["relationship", "memory", "movement", "reflection", "playlist", "energy", "story", "voice"][len(top_words)])
+    payload = {
+        "semantic_summary": f"{top_words[0]} and {top_words[1]} focused song context",
+        "themes": top_words[:3],
+        "lyrical_narrative": f"lyrics emphasize {top_words[0]} {top_words[1]} {top_words[2]}",
+        "listening_context": f"{top_words[3]} oriented listening",
+        "playlist_function": f"connect through {top_words[0]} and {top_words[1]}",
+        "transition_note": f"works after songs about {top_words[2]}",
+        "keywords": top_words[:5],
+        "source": "fallback_keyword",
+    }
+    return normalize_semantic_profile(payload, language=language, source="fallback_keyword")
+
+
+def parse_llm_semantic_profile(text: str, language: str, song: Song) -> SemanticProfile:
     payload: dict[str, object] = {}
     match = re.search(r"\{.*?\}", text, flags=re.DOTALL)
     if match:
@@ -377,54 +446,19 @@ def parse_llm_semantic_profile(text: str, language: str) -> SemanticProfile:
         except (TypeError, ValueError, json.JSONDecodeError):
             pass
     if not payload:
-        for key in ("dominant_emotion", "secondary_emotion", "valence", "arousal", "emotion_arc", "playlist_role"):
-            key_match = re.search(rf'"{key}"\s*:\s*"([^"]+)"', text)
-            if key_match:
-                payload[key] = key_match.group(1)
-        theme_match = re.search(r'"theme_tags"\s*:\s*\[([^\]]*)', text, flags=re.DOTALL)
-        if theme_match:
-            payload["theme_tags"] = re.findall(r'"([^"]+)"', theme_match.group(1))
-    dominant = clean_choice(
-        payload.get("dominant_emotion", payload.get("emotion", payload.get("label"))),
-        ALLOWED_EMOTIONS,
-        "neutral",
-    )
-    secondary = clean_choice(payload.get("secondary_emotion"), ALLOWED_EMOTIONS, dominant)
-    theme_value = payload.get("theme_tags", payload.get("themes", payload.get("theme")))
-    profile = SemanticProfile(
-        language=language,
-        dominant_emotion=dominant,
-        secondary_emotion=secondary,
-        valence=clean_choice(payload.get("valence"), ALLOWED_VALENCE, "mixed"),
-        arousal=clean_choice(payload.get("arousal"), ALLOWED_AROUSAL, "medium"),
-        theme_tags=parse_theme_tags(theme_value),
-        emotion_arc=clean_emotion_arc(payload.get("emotion_arc")),
-        playlist_role=clean_choice(payload.get("playlist_role"), ALLOWED_PLAYLIST_ROLES, "continue_mood"),
-        training_text="",
-    )
-    return SemanticProfile(
-        language=profile.language,
-        dominant_emotion=profile.dominant_emotion,
-        secondary_emotion=profile.secondary_emotion,
-        valence=profile.valence,
-        arousal=profile.arousal,
-        theme_tags=profile.theme_tags,
-        emotion_arc=profile.emotion_arc,
-        playlist_role=profile.playlist_role,
-        training_text=fixed_training_text(profile),
-    )
+        return fallback_semantic_profile(song, language)
+    return normalize_semantic_profile(payload, language=language, source="llm")
 
 
 def llm_prompt(song: Song, max_chars: int) -> str:
     lyrics = song.lyrics[:max_chars].replace("\r", " ").replace("\n", " ")
     return (
-        "Choose controlled labels for this song. Return only JSON, no markdown.\n"
-        "Required keys: dominant_emotion, secondary_emotion, valence, arousal, theme_tags, emotion_arc, playlist_role.\n"
-        f"Emotions: {', '.join(ALLOWED_EMOTIONS)}.\n"
-        f"Valence: {', '.join(ALLOWED_VALENCE)}. Arousal: {', '.join(ALLOWED_AROUSAL)}.\n"
-        f"Theme tags, choose exactly 3: {', '.join(ALLOWED_THEME_TAGS)}.\n"
-        f"Playlist role: {', '.join(ALLOWED_PLAYLIST_ROLES)}.\n"
-        "Do not copy the option lists. Do not use numbers. emotion_arc under 12 words.\n"
+        "Create a controlled song semantic profile for a music recommender. "
+        "Return valid JSON only. Do not recommend songs. Do not output raw emotion labels or numeric scores. "
+        "Do not repeat the song title or artist in any value. Use compact English phrases, not paragraphs.\n"
+        "Required keys: semantic_summary, themes, lyrical_narrative, listening_context, playlist_function, transition_note, keywords.\n"
+        "themes must be exactly 3 short phrases. keywords must be exactly 5 short phrases. "
+        "semantic_summary must describe lyrical meaning and playlist use in under 16 words.\n"
         f"Artist: {song.artist}\n"
         f"Title: {song.title}\n"
         f"Lyrics: {lyrics}\n"
@@ -582,7 +616,7 @@ def build_llm_song_features(
                 print(f"  raw llm output {idx}: {preview_text(text, limit=300)}")
                 if not text:
                     print(f"  raw pipeline object {idx}: {preview_text(repr(output), limit=500)}")
-            profiles[song_id] = parse_llm_semantic_profile(text, language)
+            profiles[song_id] = parse_llm_semantic_profile(text, language, songs[song_id])
             done_count = idx
         should_print = done_count >= next_progress or done_count == len(missing_ids)
         if progress_interval and should_print:
@@ -761,9 +795,9 @@ def split_playlists(playlists: list[tuple[str, list[str]]], min_len: int, holdou
     return cases
 
 
-class TfidfIndex:
-    def __init__(self, songs: dict[str, Song], min_df: int, max_features: int):
-        self.songs = songs
+class SemanticTextIndex:
+    def __init__(self, profiles: dict[str, SemanticProfile], min_df: int, max_features: int):
+        self.profiles = profiles
         self.min_df = min_df
         self.max_features = max_features
         self.vocab: dict[str, int] = {}
@@ -775,8 +809,8 @@ class TfidfIndex:
     def _fit(self) -> None:
         tokenized: dict[str, list[str]] = {}
         df: Counter[str] = Counter()
-        for song_id, song in self.songs.items():
-            tokens = tokenize(song.lyrics)
+        for song_id, profile in self.profiles.items():
+            tokens = tokenize(profile.training_text)
             tokenized[song_id] = tokens
             df.update(set(tokens))
 
@@ -829,6 +863,24 @@ class TfidfIndex:
         if top_k <= 0:
             return dict(scores)
         return dict(scores.most_common(top_k))
+
+    def score_candidates(
+        self,
+        profile: dict[int, float],
+        candidates: set[str],
+        exclude: set[str],
+    ) -> dict[str, float]:
+        if not profile or not candidates:
+            return {}
+        scores: dict[str, float] = {}
+        for song_id in candidates:
+            if song_id in exclude:
+                continue
+            vec = self.item_vectors.get(song_id)
+            if not vec:
+                continue
+            scores[song_id] = sum(profile.get(idx, 0.0) * weight for idx, weight in vec.items())
+        return scores
 
 
 def normalize_scores(scores: dict[str, float], candidates: set[str]) -> dict[str, float]:
@@ -883,11 +935,11 @@ def print_results_table(
     base_ndcg = float(comparison_row["ndcg"]) if comparison_row else 0.0
     base_proxy = float(comparison_row["proxy"]) if comparison_row else 0.0
 
-    print()
-    print("Results table")
+    print_section("Results table")
     print(f"Comparison baseline: {comparison_model}")
+    model_width = max(28, *(len(str(row["model"])) for row in rows))
     header = (
-        f"{'Model':<28} {'Retrieval':>10} {'Recall':>10} {'dRecall':>10} "
+        f"{'Model':<{model_width}} {'Retrieval':>10} {'Recall':>10} {'dRecall':>10} "
         f"{'NDCG':>10} {'dNDCG':>10} {'Proxy':>10} {'dProxy':>10}"
     )
     print(header)
@@ -899,7 +951,7 @@ def print_results_table(
         ndcg = float(row["ndcg"])
         proxy = float(row["proxy"])
         print(
-            f"{str(row['model']):<28} {retrieval_text:>10} "
+            f"{str(row['model']):<{model_width}} {retrieval_text:>10} "
             f"{recall:>10.5f} {recall - base_recall:>+10.5f} "
             f"{ndcg:>10.5f} {ndcg - base_ndcg:>+10.5f} "
             f"{proxy:>10.5f} {proxy - base_proxy:>+10.5f}"
@@ -926,10 +978,7 @@ def evaluate_prepared_model(
     prepared_cases: list[PreparedCase],
     cases: list[EvalCase],
     top_k: int,
-    alpha: float,
-    lyrics_weight: float,
     cf_weight: float,
-    mood_weight: float,
     artist_weight: float,
     type_weight: float,
     language_weight: float,
@@ -939,10 +988,7 @@ def evaluate_prepared_model(
     rankings, retrieval = build_content_rankings(
         k=top_k,
         prepared_cases=prepared_cases,
-        alpha=alpha,
-        lyrics_weight=lyrics_weight,
         cf_weight=cf_weight,
-        mood_weight=mood_weight,
         artist_weight=artist_weight,
         type_weight=type_weight,
         language_weight=language_weight,
@@ -990,51 +1036,19 @@ def score_cf(observed: list[str], cf_neighbors: dict[str, list[tuple[str, float]
     return dict(scores.most_common(top_k))
 
 
-def average_mood(song_ids: list[str], features: dict[str, SongFeature], decay: float = 1.0) -> tuple[float, float]:
-    total_weight = 0.0
-    valence = 0.0
-    arousal = 0.0
-    n_songs = len(song_ids)
-    for pos, song_id in enumerate(song_ids):
-        feature = features.get(song_id)
-        if not feature:
-            continue
-        weight = decay ** (n_songs - pos - 1) if decay < 1.0 else 1.0
-        total_weight += weight
-        valence += feature.valence * weight
-        arousal += feature.arousal * weight
-    if not total_weight:
-        return EMOTION_VECTOR["other"]
-    return valence / total_weight, arousal / total_weight
-
-
-def score_metadata_and_mood(
+def score_metadata(
     observed: list[str],
     candidates: set[str],
     songs: dict[str, Song],
     features: dict[str, SongFeature],
-    short_window: int,
-    time_decay: float,
-    mood_drift_beta: float,
-) -> tuple[dict[str, float], dict[str, float], dict[str, float], dict[str, float]]:
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
     observed_artists = Counter(songs[song_id].artist for song_id in observed if song_id in songs)
     observed_types = Counter(features[song_id].primary_type for song_id in observed if song_id in features)
     observed_languages = Counter(features[song_id].language for song_id in observed if song_id in features)
 
-    first_half = observed[: max(1, len(observed) // 2)]
-    second_half = observed[max(1, len(observed) // 2) :]
-    recent = average_mood(observed[-short_window:], features, decay=time_decay)
-    first_mood = average_mood(first_half, features, decay=time_decay)
-    second_mood = average_mood(second_half, features, decay=time_decay)
-    projected_mood = (
-        recent[0] + mood_drift_beta * (second_mood[0] - first_mood[0]),
-        recent[1] + mood_drift_beta * (second_mood[1] - first_mood[1]),
-    )
-
     artist_scores: dict[str, float] = {}
     type_scores: dict[str, float] = {}
     language_scores: dict[str, float] = {}
-    mood_scores: dict[str, float] = {}
     for candidate in candidates:
         song = songs.get(candidate)
         feature = features.get(candidate)
@@ -1043,58 +1057,8 @@ def score_metadata_and_mood(
         artist_scores[candidate] = float(observed_artists.get(song.artist, 0))
         type_scores[candidate] = float(observed_types.get(feature.primary_type, 0))
         language_scores[candidate] = float(observed_languages.get(feature.language, 0))
-        mood_scores[candidate] = cosine2((feature.valence, feature.arousal), projected_mood)
 
-    return artist_scores, type_scores, language_scores, mood_scores
-
-
-def score_semantic_labels(
-    observed: list[str],
-    candidates: set[str],
-    profiles: dict[str, SemanticProfile],
-    short_window: int,
-    time_decay: float,
-) -> dict[str, float]:
-    recent = [song_id for song_id in observed[-short_window:] if song_id in profiles]
-    if not recent:
-        return {}
-
-    emotion_counts: Counter[str] = Counter()
-    theme_counts: Counter[str] = Counter()
-    role_counts: Counter[str] = Counter()
-    valence_counts: Counter[str] = Counter()
-    arousal_counts: Counter[str] = Counter()
-    total_weight = 0.0
-    n_songs = len(recent)
-    for pos, song_id in enumerate(recent):
-        profile = profiles[song_id]
-        weight = time_decay ** (n_songs - pos - 1) if time_decay < 1.0 else 1.0
-        total_weight += weight
-        emotion_counts[profile.dominant_emotion] += weight
-        emotion_counts[profile.secondary_emotion] += 0.5 * weight
-        for tag in profile.theme_tags:
-            theme_counts[tag] += weight
-        role_counts[profile.playlist_role] += weight
-        valence_counts[profile.valence] += weight
-        arousal_counts[profile.arousal] += weight
-
-    if not total_weight:
-        return {}
-
-    scores: dict[str, float] = {}
-    for candidate in candidates:
-        profile = profiles.get(candidate)
-        if not profile:
-            continue
-        score = 0.0
-        score += 0.35 * emotion_counts.get(profile.dominant_emotion, 0.0) / total_weight
-        score += 0.15 * emotion_counts.get(profile.secondary_emotion, 0.0) / total_weight
-        score += 0.20 * sum(theme_counts.get(tag, 0.0) for tag in profile.theme_tags) / (3.0 * total_weight)
-        score += 0.10 * valence_counts.get(profile.valence, 0.0) / total_weight
-        score += 0.10 * arousal_counts.get(profile.arousal, 0.0) / total_weight
-        score += 0.10 * role_counts.get(profile.playlist_role, 0.0) / total_weight
-        scores[candidate] = score
-    return scores
+    return artist_scores, type_scores, language_scores
 
 
 def rank_popularity(case: EvalCase, popularity: Counter[str], catalog: set[str], k: int) -> list[str]:
@@ -1114,14 +1078,12 @@ def prepare_content_cases(
     cases: list[EvalCase],
     songs: dict[str, Song],
     features: dict[str, SongFeature],
-    semantic_profiles: dict[str, SemanticProfile],
-    index: TfidfIndex,
+    semantic_index: SemanticTextIndex | None,
     cf_neighbors: dict[str, list[tuple[str, float]]],
     popularity: Counter[str],
     pool_size: int,
     short_window: int,
     time_decay: float,
-    mood_drift_beta: float,
     cold_start_threshold: int,
     progress_interval: int,
 ) -> list[PreparedCase]:
@@ -1130,7 +1092,8 @@ def prepare_content_cases(
     started = time.time()
     cold_count = 0
 
-    print("Preparing candidate scores once before alpha sweep...")
+    print_section("Preparing candidate scores")
+    print("  candidate source: CF + popularity")
     for idx, case in enumerate(cases, start=1):
         exclude = set(case.observed)
         cold_start = len(case.observed) <= cold_start_threshold
@@ -1138,44 +1101,28 @@ def prepare_content_cases(
         if cold_start:
             cold_count += 1
             candidates = {song_id for song_id in top_popular if song_id not in exclude}
-            long_norm: dict[str, float] = {}
-            short_norm: dict[str, float] = {}
             cf_norm: dict[str, float] = {}
         else:
-            long_profile = index.profile(case.observed, decay=time_decay)
-            short_profile = index.profile(case.observed[-short_window:], decay=time_decay)
-            long_scores = index.score_profile(long_profile, exclude, pool_size)
-            short_scores = index.score_profile(short_profile, exclude, pool_size)
             cf_scores = score_cf(case.observed, cf_neighbors, exclude, pool_size)
-            candidates = set(long_scores) | set(short_scores)
-            candidates.update(cf_scores)
+            candidates = set(cf_scores)
             candidates.update(song_id for song_id in top_popular if song_id not in exclude)
-            long_norm = normalize_scores(long_scores, candidates)
-            short_norm = normalize_scores(short_scores, candidates)
             cf_norm = normalize_scores(cf_scores, candidates)
 
-        artist_scores, type_scores, language_scores, mood_scores = score_metadata_and_mood(
+        artist_scores, type_scores, language_scores = score_metadata(
             observed=case.observed,
             candidates=candidates,
             songs=songs,
             features=features,
-            short_window=short_window,
-            time_decay=time_decay,
-            mood_drift_beta=mood_drift_beta,
         )
-        semantic_scores = score_semantic_labels(
-            observed=case.observed,
-            candidates=candidates,
-            profiles=semantic_profiles,
-            short_window=short_window,
-            time_decay=time_decay,
-        )
+        semantic_scores: dict[str, float] = {}
+        if semantic_index:
+            semantic_profile = semantic_index.profile(case.observed[-short_window:], decay=time_decay)
+            semantic_scores = semantic_index.score_candidates(semantic_profile, candidates, exclude)
         pop_raw = {song_id: float(popularity.get(song_id, 0)) for song_id in candidates}
         pop_norm = normalize_scores(pop_raw, candidates)
         artist_norm = normalize_scores(artist_scores, candidates)
         type_norm = normalize_scores(type_scores, candidates)
         language_norm = normalize_scores(language_scores, candidates)
-        mood_norm = normalize_scores(mood_scores, candidates)
         semantic_norm = normalize_scores(semantic_scores, candidates)
         retrieval = recall_at_k(list(candidates), set(case.heldout), len(candidates))
         prepared.append(
@@ -1183,13 +1130,10 @@ def prepare_content_cases(
                 playlist_id=case.playlist_id,
                 heldout=case.heldout,
                 candidates=candidates,
-                long_norm=long_norm,
-                short_norm=short_norm,
                 cf_norm=cf_norm,
                 artist_norm=artist_norm,
                 type_norm=type_norm,
                 language_norm=language_norm,
-                mood_norm=mood_norm,
                 semantic_norm=semantic_norm,
                 pop_norm=pop_norm,
                 retrieval=retrieval,
@@ -1212,10 +1156,7 @@ def prepare_content_cases(
 def build_content_rankings(
     prepared_cases: list[PreparedCase],
     k: int,
-    alpha: float,
-    lyrics_weight: float,
     cf_weight: float,
-    mood_weight: float,
     artist_weight: float,
     type_weight: float,
     language_weight: float,
@@ -1228,10 +1169,7 @@ def build_content_rankings(
     for case in prepared_cases:
         retrieval_recalls.append(case.retrieval)
         final_scores = {
-            song_id: lyrics_weight
-            * (alpha * case.long_norm.get(song_id, 0.0) + (1.0 - alpha) * case.short_norm.get(song_id, 0.0))
-            + cf_weight * case.cf_norm.get(song_id, 0.0)
-            + mood_weight * case.mood_norm.get(song_id, 0.0)
+            song_id: cf_weight * case.cf_norm.get(song_id, 0.0)
             + artist_weight * case.artist_norm.get(song_id, 0.0)
             + type_weight * case.type_norm.get(song_id, 0.0)
             + language_weight * case.language_norm.get(song_id, 0.0)
@@ -1246,6 +1184,12 @@ def build_content_rankings(
     return rankings, retrieval
 
 
+def print_section(title: str) -> None:
+    print()
+    print(title)
+    print("=" * 20)
+
+
 def print_dataset_study(songs: dict[str, Song], playlists: list[tuple[str, list[str]]], cases: list[EvalCase]) -> None:
     lengths = [len(tracks) for _, tracks in playlists]
     matched_tracks = sum(lengths)
@@ -1254,7 +1198,7 @@ def print_dataset_study(songs: dict[str, Song], playlists: list[tuple[str, list[
     density = matched_tracks / (users * catalog) if users and catalog else 0.0
     observed_lengths = [len(case.observed) for case in cases]
     heldout_lengths = [len(case.heldout) for case in cases]
-    print("Dataset study")
+    print_section("Dataset study")
     print(f"  songs with lyrics:       {len(songs):,}")
     print(f"  matched playlists:       {len(playlists):,}")
     print(f"  eval playlists:          {len(cases):,}")
@@ -1281,12 +1225,16 @@ def preview_text(value: str, limit: int = 90) -> str:
 
 
 def print_song_head(songs: dict[str, Song], limit: int = 10) -> None:
-    print("Head 10 songs")
-    for idx, song in enumerate(list(songs.values())[:limit], start=1):
-        print(
-            f"  {idx:>2}. artist={song.artist} | song={song.title} | "
-            f"lyrics={preview_text(song.lyrics)}"
-        )
+    print_section("Song example")
+    song = next(iter(songs.values()), None)
+    if not song:
+        print("  No songs loaded.")
+        return
+    print(f"  song_id: {song.song_id}")
+    print(f"  title:   {song.title}")
+    print(f"  artist:  {song.artist}")
+    print("  lyrics:")
+    print(f"    {preview_text(song.lyrics, limit=240)}")
 
 
 def print_playlist_head(
@@ -1295,24 +1243,27 @@ def print_playlist_head(
     limit: int = 10,
     track_limit: int = 10,
 ) -> None:
-    print("Head 10 playlists")
+    print_section("Playlist example")
     if not playlists:
         print("  No playlist data loaded yet.")
         return
-    for idx, (playlist_id, track_ids) in enumerate(playlists[:limit], start=1):
-        names = []
-        for song_id in track_ids[:track_limit]:
-            song = songs.get(song_id)
-            names.append(f"{song.title} / {song.artist}" if song else song_id)
-        suffix = " ..." if len(track_ids) > track_limit else ""
-        print(f"  {idx:>2}. playlist={playlist_id} | tracks={len(track_ids)} | {', '.join(names)}{suffix}")
+    playlist_id, track_ids = playlists[0]
+    print(f"  playlist_id: {playlist_id}")
+    print(f"  tracks:      {len(track_ids)}")
+    print("  song list:")
+    for idx, song_id in enumerate(track_ids[:track_limit], start=1):
+        song = songs.get(song_id)
+        label = f"{song.title} / {song.artist}" if song else song_id
+        print(f"    {idx:>2}. {label}")
+    if len(track_ids) > track_limit:
+        print(f"    ... {len(track_ids) - track_limit:,} more tracks not shown")
 
 
 def print_all_data_stats(songs: dict[str, Song], playlists: list[tuple[str, list[str]]]) -> None:
     playlist_lengths = [len(track_ids) for _, track_ids in playlists]
     unique_playlist_tracks = {song_id for _, track_ids in playlists for song_id in track_ids}
     lyric_token_counts = [len(tokenize(song.lyrics)) for song in songs.values()]
-    print("All loaded data stats")
+    print_section("All loaded data stats")
     print(f"  song lyric rows:         {len(songs):,}")
     print(f"  playlists loaded:        {len(playlists):,}")
     print(f"  matched playlist tracks: {sum(playlist_lengths):,}")
@@ -1336,10 +1287,7 @@ def describe_song(song_id: str, songs: dict[str, Song], features: dict[str, Song
     feature = features.get(song_id)
     if not feature:
         return f"{song.title} / {song.artist}"
-    return (
-        f"{song.title} / {song.artist} "
-        f"[type={feature.primary_type}, lang={feature.language}, mood=({feature.valence:.2f},{feature.arousal:.2f})]"
-    )
+    return f"{song.title} / {song.artist} [type={feature.primary_type}, lang={feature.language}]"
 
 
 def print_example_recs(
@@ -1354,24 +1302,15 @@ def print_example_recs(
     if not cases:
         return
     case = cases[0]
-    first_mood = average_mood(case.observed[: max(1, len(case.observed) // 2)], features, decay=time_decay)
-    recent_mood = average_mood(case.observed[-short_window:], features, decay=time_decay)
-    heldout_mood = average_mood(case.heldout, features, decay=time_decay)
-    print()
-    print(f"Example recommendations for playlist {case.playlist_id}")
-    print(
-        "  mood path: "
-        f"early=({first_mood[0]:.2f},{first_mood[1]:.2f}) -> "
-        f"recent=({recent_mood[0]:.2f},{recent_mood[1]:.2f}) -> "
-        f"heldout=({heldout_mood[0]:.2f},{heldout_mood[1]:.2f})"
-    )
-    print("  input:")
+    print_section("Example recommendation")
+    print(f"  playlist_id: {case.playlist_id}")
+    print("  input songs:")
     for song_id in case.observed[:limit]:
         print(f"    - {describe_song(song_id, songs, features)}")
-    print("  heldout:")
+    print("  hidden heldout songs:")
     for song_id in case.heldout[:limit]:
         print(f"    - {describe_song(song_id, songs, features)}")
-    print("  recommended:")
+    print("  recommended songs:")
     for song_id in rankings.get(case.playlist_id, [])[:limit]:
         print(f"    - {describe_song(song_id, songs, features)}")
 
@@ -1383,8 +1322,7 @@ def print_semantic_examples(
 ) -> None:
     if not profiles:
         return
-    print()
-    print("Semantic profile examples")
+    print_section("Semantic profile example")
     shown = 0
     for song_id in songs:
         profile = profiles.get(song_id)
@@ -1392,19 +1330,27 @@ def print_semantic_examples(
         if not profile or not song:
             continue
         shown += 1
-        print(
-            f"  {shown}. {song.title} / {song.artist} | "
-            f"emotion={profile.dominant_emotion}+{profile.secondary_emotion} | "
-            f"valence={profile.valence} | arousal={profile.arousal} | "
-            f"themes={', '.join(profile.theme_tags)} | role={profile.playlist_role}"
-        )
-        print(f"     training_text={profile.training_text}")
+        print(f"  song_id:            {song_id}")
+        print(f"  title:              {song.title}")
+        print(f"  artist:             {song.artist}")
+        print(f"  language:           {profile.language}")
+        print(f"  source:             {profile.source}")
+        print(f"  semantic_summary:   {profile.semantic_summary}")
+        print(f"  themes:             {', '.join(profile.themes)}")
+        print(f"  lyrical_narrative:  {profile.lyrical_narrative}")
+        print(f"  listening_context:  {profile.listening_context}")
+        print(f"  playlist_function:  {profile.playlist_function}")
+        print(f"  transition_note:    {profile.transition_note}")
+        print(f"  keywords:           {', '.join(profile.keywords)}")
+        print("  training_text:")
+        print(f"    {profile.training_text}")
         if shown >= limit:
             break
+        print()
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Lyrics TF-IDF playlist continuation prototype")
+    parser = argparse.ArgumentParser(description="CF + structured semantic text playlist continuation prototype")
     parser.add_argument("--lyrics-csv", type=Path, help="Spotify Million Song lyrics CSV")
     parser.add_argument("--mpd-path", type=Path, help="MPD JSON file/directory with playlists")
     parser.add_argument("--playlist-csv", type=Path, help="Alternative simple playlist CSV")
@@ -1417,7 +1363,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--short-window", type=int, default=5)
     parser.add_argument("--time-decay", type=float, default=0.9, help="Older observed songs get decay^(distance from newest)")
-    parser.add_argument("--mood-drift-beta", type=float, default=0.5, help="Extrapolate recent mood by beta * mood drift")
+    parser.add_argument("--mood-drift-beta", type=float, default=0.0, help=argparse.SUPPRESS)
     parser.add_argument("--cold-start-threshold", type=int, default=1, help="Use popularity-only ranking when observed history has this many songs or fewer")
     parser.add_argument("--progress-interval", type=int, default=1000, help="Print candidate-prep progress every N eval playlists")
     parser.add_argument("--cf-neighbors", type=int, default=100, help="Keep top N co-occurrence neighbors per song")
@@ -1432,18 +1378,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--llm-cache-dir", type=Path, default=DEFAULT_LLM_CACHE_DIR)
     parser.add_argument("--semantic-cache-dir", type=Path, default=DEFAULT_SEMANTIC_CACHE_DIR)
     parser.add_argument("--llm-device", choices=["auto", "cpu", "cuda"], default="auto")
-    parser.add_argument("--lyrics-weight", type=float, default=0.25)
+    parser.add_argument("--lyrics-weight", type=float, default=0.0, help=argparse.SUPPRESS)
     parser.add_argument("--cf-weight", type=float, default=0.35)
-    parser.add_argument("--mood-weight", type=float, default=0.15)
+    parser.add_argument("--mood-weight", type=float, default=0.0, help=argparse.SUPPRESS)
     parser.add_argument("--artist-weight", type=float, default=0.10)
     parser.add_argument("--type-weight", type=float, default=0.05)
     parser.add_argument("--language-weight", type=float, default=0.02)
-    parser.add_argument("--semantic-weight", type=float, default=0.05)
+    parser.add_argument("--semantic-weight", type=float, default=0.15)
     parser.add_argument("--no-ablations", action="store_true", help="Skip cheap post-sweep ablation comparisons")
     parser.add_argument("--min-df", type=int, default=2)
     parser.add_argument("--max-features", type=int, default=30000)
     parser.add_argument("--pop-weight", type=float, default=0.10)
-    parser.add_argument("--alpha-grid-step", type=float, default=0.1)
+    parser.add_argument("--alpha-grid-step", type=float, default=0.1, help=argparse.SUPPRESS)
     parser.add_argument("--seed", type=int, default=172)
     return parser.parse_args()
 
@@ -1497,11 +1443,8 @@ def main() -> None:
         args.min_df = 1
         args.pool_size = min(args.pool_size, 20)
 
-    print()
     print_song_head(songs, limit=10)
-    print()
     print_playlist_head(playlists, songs, limit=10)
-    print()
     print_all_data_stats(songs, playlists)
 
     if not playlists:
@@ -1522,11 +1465,11 @@ def main() -> None:
     popularity = popularity_counts(cases)
 
     print_dataset_study(songs, playlists, cases)
-    print()
-    print("Building song feature table...")
+    print_section("Building song feature table")
+    features = build_song_features(songs)
     semantic_profiles: dict[str, SemanticProfile] = {}
     if args.emotion_source == "llm":
-        features, semantic_profiles = build_llm_song_features(
+        _, semantic_profiles = build_llm_song_features(
             songs=songs,
             model_name=args.llm_model,
             llm_cache_dir=args.llm_cache_dir,
@@ -1539,19 +1482,15 @@ def main() -> None:
             debug_output=args.llm_debug_output,
             batch_size=args.llm_batch_size,
         )
-        missing_features = set(songs) - set(features)
-        if missing_features:
+        missing_semantic = set(songs) - set(semantic_profiles)
+        if missing_semantic:
             if args.require_semantic_coverage:
                 raise SystemExit(
                     "LLM semantic coverage is incomplete. "
-                    f"Missing {len(missing_features):,} selected eval songs. "
+                    f"Missing {len(missing_semantic):,} selected eval songs. "
                     "Rerun with --emotion-limit 0 or a larger limit, or omit --require-semantic-coverage for weak fallback."
                 )
-            print(f"  LLM features incomplete; using weak fallback for {len(missing_features):,} songs.")
-            weak_features = build_song_features({song_id: songs[song_id] for song_id in missing_features})
-            features.update(weak_features)
-    else:
-        features = build_song_features(songs)
+            print(f"  LLM semantic profiles incomplete; semantic-text score disabled for {len(missing_semantic):,} songs.")
     print(f"  emotion source:         {args.emotion_source}")
     type_counts = Counter(feature.primary_type for feature in features.values())
     language_counts = Counter(feature.language for feature in features.values())
@@ -1561,35 +1500,36 @@ def main() -> None:
         theme_counts: Counter[str] = Counter()
         role_counts: Counter[str] = Counter()
         for profile in semantic_profiles.values():
-            theme_counts.update(profile.theme_tags)
-            role_counts[profile.playlist_role] += 1
+            theme_counts.update(profile.themes)
+            role_counts[profile.playlist_function] += 1
         print("  top semantic themes:     " + ", ".join(f"{k}={v:,}" for k, v in theme_counts.most_common(5)))
-        print("  playlist roles:          " + ", ".join(f"{k}={v:,}" for k, v in role_counts.most_common(5)))
+        print("  playlist functions:      " + ", ".join(f"{k}={v:,}" for k, v in role_counts.most_common(5)))
         print_semantic_examples(songs, semantic_profiles, limit=5)
-    print()
-    print("Building co-occurrence CF neighbors...")
+    print_section("Building co-occurrence CF neighbors")
     cf_neighbors = build_cf_neighbors(cases, args.cf_neighbors)
     neighbor_edges = sum(len(items) for items in cf_neighbors.values())
     print(f"  songs with neighbors:    {len(cf_neighbors):,}")
     print(f"  stored neighbor edges:   {neighbor_edges:,}")
-    print()
-    print("Building lyrics TF-IDF/content-IDF index...")
-    index = TfidfIndex(songs, args.min_df, args.max_features)
-    print(f"  vocab size:              {len(index.vocab):,}")
-    print(f"  indexed songs:           {len(index.item_vectors):,}")
+    semantic_index: SemanticTextIndex | None = None
+    if semantic_profiles:
+        print_section("Building structured semantic text index")
+        semantic_index = SemanticTextIndex(semantic_profiles, args.min_df, args.max_features)
+        print(f"  semantic vocab size:     {len(semantic_index.vocab):,}")
+        print(f"  indexed semantic songs:  {len(semantic_index.item_vectors):,}")
+    else:
+        print_section("Building structured semantic text index")
+        print("No structured semantic profiles found; semantic-text score is disabled.")
 
     prepared_cases = prepare_content_cases(
         cases=cases,
         songs=songs,
         features=features,
-        semantic_profiles=semantic_profiles,
-        index=index,
+        semantic_index=semantic_index,
         cf_neighbors=cf_neighbors,
         popularity=popularity,
         pool_size=args.pool_size,
         short_window=args.short_window,
         time_decay=args.time_decay,
-        mood_drift_beta=args.mood_drift_beta,
         cold_start_threshold=args.cold_start_threshold,
         progress_interval=args.progress_interval,
     )
@@ -1602,10 +1542,13 @@ def main() -> None:
     random_recall, random_ndcg = evaluate_rankings(random_rankings, cases, args.top_k)
     pop_recall, pop_ndcg = evaluate_rankings(pop_rankings, cases, args.top_k)
 
-    print()
-    print("Baselines")
-    print(f"  random       Recall@{args.top_k}: {random_recall:.5f}  NDCG@{args.top_k}: {random_ndcg:.5f}")
-    print(f"  popularity   Recall@{args.top_k}: {pop_recall:.5f}  NDCG@{args.top_k}: {pop_ndcg:.5f}")
+    print_section("Baselines")
+    print("  random")
+    print(f"    Recall@{args.top_k}: {random_recall:.5f}")
+    print(f"    NDCG@{args.top_k}:   {random_ndcg:.5f}")
+    print("  popularity")
+    print(f"    Recall@{args.top_k}: {pop_recall:.5f}")
+    print(f"    NDCG@{args.top_k}:   {pop_ndcg:.5f}")
     result_rows: list[dict[str, float | str]] = [
         result_row("Random", "", random_recall, random_ndcg),
         result_row("Popularity", "", pop_recall, pop_ndcg),
@@ -1616,10 +1559,7 @@ def main() -> None:
         prepared_cases=prepared_cases,
         cases=cases,
         top_k=args.top_k,
-        alpha=0.0,
-        lyrics_weight=0.0,
         cf_weight=args.cf_weight,
-        mood_weight=0.0,
         artist_weight=0.0,
         type_weight=0.0,
         language_weight=0.0,
@@ -1627,83 +1567,54 @@ def main() -> None:
         pop_weight=args.pop_weight,
     )
     result_rows.append(cf_pop_row)
-    print(
-        f"  CF+popularity Recall@{args.top_k}: {float(cf_pop_row['recall']):.5f}  "
-        f"NDCG@{args.top_k}: {float(cf_pop_row['ndcg']):.5f}"
+    print("  CF + popularity")
+    print(f"    Recall@{args.top_k}: {float(cf_pop_row['recall']):.5f}")
+    print(f"    NDCG@{args.top_k}:   {float(cf_pop_row['ndcg']):.5f}")
+
+    hybrid_label = "Hybrid structured semantic"
+    print_section("Structured semantic rerank")
+    rankings, retrieval = build_content_rankings(
+        k=args.top_k,
+        prepared_cases=prepared_cases,
+        cf_weight=args.cf_weight,
+        artist_weight=args.artist_weight,
+        type_weight=args.type_weight,
+        language_weight=args.language_weight,
+        semantic_weight=args.semantic_weight,
+        pop_weight=args.pop_weight,
     )
+    recall, ndcg = evaluate_rankings(rankings, cases, args.top_k)
+    proxy = (recall + ndcg) / 2.0
+    print(f"  Retrieval@{args.pool_size}: {retrieval:.5f}")
+    print(f"  Recall@{args.top_k}:    {recall:.5f}")
+    print(f"  NDCG@{args.top_k}:      {ndcg:.5f}")
+    print(f"  Proxy:         {proxy:.5f}")
+    result_rows.append(result_row(hybrid_label, retrieval, recall, ndcg))
 
-    alphas: list[float] = []
-    value = 0.0
-    while value <= 1.000001:
-        alphas.append(round(value, 10))
-        value += args.alpha_grid_step
-    if 1.0 not in alphas:
-        alphas.append(1.0)
-
-    hybrid_label = f"Hybrid {args.emotion_source}"
-    best = None
-    print()
-    print("Hybrid fusion sweep")
-    for alpha in alphas:
-        rankings, retrieval = build_content_rankings(
-            k=args.top_k,
-            prepared_cases=prepared_cases,
-            alpha=alpha,
-            lyrics_weight=args.lyrics_weight,
-            cf_weight=args.cf_weight,
-            mood_weight=args.mood_weight,
-            artist_weight=args.artist_weight,
-            type_weight=args.type_weight,
-            language_weight=args.language_weight,
-            semantic_weight=args.semantic_weight,
-            pop_weight=args.pop_weight,
-        )
-        recall, ndcg = evaluate_rankings(rankings, cases, args.top_k)
-        proxy = (recall + ndcg) / 2.0
-        print(
-            f"  alpha={alpha:>4.2f}  Retrieval@{args.pool_size}: {retrieval:.5f}  "
-            f"Recall@{args.top_k}: {recall:.5f}  NDCG@{args.top_k}: {ndcg:.5f}  Proxy: {proxy:.5f}"
-        )
-        result_rows.append(result_row(f"{hybrid_label} alpha={alpha:.2f}", retrieval, recall, ndcg))
-        candidate = (proxy, recall, ndcg, retrieval, alpha, rankings)
-        if best is None or candidate[:4] > best[:4]:
-            best = candidate
-
-    assert best is not None
-    proxy, recall, ndcg, retrieval, alpha, rankings = best
-    print()
-    print("Best prototype result")
-    print(f"  method:                 hybrid_cf_metadata_mood_tfidf_{args.emotion_source}")
-    print(f"  alpha long-term:        {alpha:.2f}")
-    print(f"  alpha short-term:       {1.0 - alpha:.2f}")
+    print_section("Best prototype result")
+    print("  method:                 hybrid_cf_metadata_structured_semantic")
     print(f"  time decay:             {args.time_decay:.2f}")
-    print(f"  weights:                lyrics={args.lyrics_weight:.2f}, cf={args.cf_weight:.2f}, mood={args.mood_weight:.2f}, artist={args.artist_weight:.2f}, type={args.type_weight:.2f}, language={args.language_weight:.2f}, semantic={args.semantic_weight:.2f}, pop={args.pop_weight:.2f}")
+    print(f"  weights:                cf={args.cf_weight:.2f}, artist={args.artist_weight:.2f}, type={args.type_weight:.2f}, language={args.language_weight:.2f}, semantic_text={args.semantic_weight:.2f}, pop={args.pop_weight:.2f}")
     print(f"  Retrieval@{args.pool_size}:          {retrieval:.5f}")
     print(f"  Recall@{args.top_k}:             {recall:.5f}")
     print(f"  NDCG@{args.top_k}:               {ndcg:.5f}")
     print(f"  Proxy:                 {proxy:.5f}")
-    result_rows.append(result_row(f"Best {hybrid_label} alpha={alpha:.2f}", retrieval, recall, ndcg))
+    result_rows.append(result_row(f"Best {hybrid_label}", retrieval, recall, ndcg))
     if not args.no_ablations:
-        print()
-        print("Ablation comparisons at best alpha")
+        print_section("Ablation comparisons")
         ablations = [
-            ("No CF", args.lyrics_weight, 0.0, args.mood_weight, args.artist_weight, args.type_weight, args.language_weight, args.semantic_weight, args.pop_weight),
-            ("No mood/drift", args.lyrics_weight, args.cf_weight, 0.0, args.artist_weight, args.type_weight, args.language_weight, args.semantic_weight, args.pop_weight),
-            ("No metadata", args.lyrics_weight, args.cf_weight, args.mood_weight, 0.0, 0.0, 0.0, args.semantic_weight, args.pop_weight),
-            ("No semantic labels", args.lyrics_weight, args.cf_weight, args.mood_weight, args.artist_weight, args.type_weight, args.language_weight, 0.0, args.pop_weight),
-            ("No lyrics", 0.0, args.cf_weight, args.mood_weight, args.artist_weight, args.type_weight, args.language_weight, args.semantic_weight, args.pop_weight),
-            ("CF + popularity", 0.0, args.cf_weight, 0.0, 0.0, 0.0, 0.0, 0.0, args.pop_weight),
+            ("No CF", 0.0, args.artist_weight, args.type_weight, args.language_weight, args.semantic_weight, args.pop_weight),
+            ("No metadata", args.cf_weight, 0.0, 0.0, 0.0, args.semantic_weight, args.pop_weight),
+            ("No structured semantic", args.cf_weight, args.artist_weight, args.type_weight, args.language_weight, 0.0, args.pop_weight),
+            ("CF + popularity", args.cf_weight, 0.0, 0.0, 0.0, 0.0, args.pop_weight),
         ]
-        for name, lyrics_w, cf_w, mood_w, artist_w, type_w, language_w, semantic_w, pop_w in ablations:
+        for name, cf_w, artist_w, type_w, language_w, semantic_w, pop_w in ablations:
             row, _, _ = evaluate_prepared_model(
                 model=name,
                 prepared_cases=prepared_cases,
                 cases=cases,
                 top_k=args.top_k,
-                alpha=alpha,
-                lyrics_weight=lyrics_w,
                 cf_weight=cf_w,
-                mood_weight=mood_w,
                 artist_weight=artist_w,
                 type_weight=type_w,
                 language_weight=language_w,

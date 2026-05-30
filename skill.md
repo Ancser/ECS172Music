@@ -41,12 +41,21 @@ Optional Gemma 3 LLM setup and small comparison run:
 pushd <project-folder>
 python -m huggingface_hub.cli.hf auth login
 python .\install_llm.py --cuda-torch --device cuda
-python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 2 --require-semantic-coverage --mpd-path .\data --lyrics-csv .\data\spotify_millsongdata.csv --max-playlists 1000 --max-eval-cases 100 --holdout-k 10 --min-playlist-len 20 --pool-size 100 --alpha-grid-step 0.5 --emotion-limit 0 --lyrics-weight 0.0 --semantic-weight 0.05 --progress-interval 25
+python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 10 --require-semantic-coverage --mpd-path .\data --lyrics-csv .\data\spotify_millsongdata.csv --max-playlists 1000 --max-eval-cases 100 --holdout-k 10 --min-playlist-len 20 --pool-size 200 --emotion-limit 0 --semantic-weight 0.15 --progress-interval 25
 ```
 
 Default LLM model: `google/gemma-3-270m-it`.
 Use this first because the local GPU memory budget is about 3 GB.
-Use `--require-semantic-coverage --emotion-limit 0` for final LLM runs, because this fails instead of using weak fallback when selected playlist songs are missing semantic profiles. LLM progress should stay readable: one semantic song progress line with cached count, batch size, rate, elapsed time, and ETA. On a 4 GB GPU, start with `--llm-batch-size 2`; lower to `1` if CUDA memory fails.
+Use `--require-semantic-coverage --emotion-limit 0` for final LLM runs, because this fails instead of comparing unprocessed songs semantically when selected playlist songs are missing structured semantic profiles. Raw lyrics should not be compared directly in the hybrid LLM path. LLM progress should stay readable: one semantic song progress line with cached count, batch size, rate, elapsed time, and ETA. On the local 4 GB GPU, batch 10 worked; lower it if CUDA memory fails.
+
+For the local Spotify-style web demo:
+
+```powershell
+pushd <project-folder>
+.\start_spotify_web.bat
+```
+
+Default web recommendation controls are `batch=10` and `candidates=200`, because the local GPU handled batch 10 well and candidate 200 better demonstrates the two-stage retrieval/reranking design.
 
 For a quick no-data demo:
 
@@ -453,26 +462,29 @@ High Recall@10 from popularity may indicate dataset popularity bias.
 Check catalog coverage and artist diversity.
 ```
 
-### 4.6 Route D: Future LLM Emotion Retrieval
+### 4.6 Route D: Structured LLM Semantic Text
 
-Do not use this until TF-IDF and CF baselines are measured.
+Use this only after CF + popularity is measured.
 
-Later, use LLM-generated song emotion table:
+Use an LLM-generated structured song semantic table:
 
 ```text
 song_id
-primary_emotion
-secondary_emotion
-valence
-arousal
-mood_summary
+semantic_summary
+themes
+lyrical_narrative
+listening_context
+playlist_function
+transition_note
+keywords
+training_text
 ```
 
 Candidate score:
 
 ```text
-recent_mood = average valence/arousal of last N observed songs
-score_emotion(candidate) = cosine(candidate_emotion_vector, recent_mood)
+recent_semantic = average training_text vector of last N observed songs with profiles
+score_semantic(candidate) = cosine(candidate_semantic_text_vector, recent_semantic)
 ```
 
 This replaces or augments the current short-term lyrics TF-IDF route.
@@ -650,20 +662,14 @@ Run and report:
 ```text
 Random
 Popularity
-Lyrics TF-IDF long-term
-Lyrics TF-IDF short-term
-Lyrics TF-IDF long/short fusion
 Co-occurrence CF
 CF + popularity baseline
-Hybrid CF + metadata + mood + lyrics TF-IDF
+Hybrid CF + metadata + mood + structured semantic text
 ```
 
 Later LLM variants:
 
 ```text
-LLM semantic labels only
-CF + LLM semantic label match
-CF + lyrics TF-IDF + LLM semantic labels
 CF + Gemma 3 semantic training_text embedding
 CF + Gemma 3 Semantic ID / cluster
 mood drift ablation
@@ -717,16 +723,12 @@ Model                         Retrieval     Recall    dRecall       NDCG      dN
 Random                                -          ?          ?          ?          ?          ?          ?
 Popularity                            -          ?          ?          ?          ?          ?          ?
 CF + popularity baseline              ?          ?   +0.00000          ?   +0.00000          ?   +0.00000
-Hybrid alpha=0.00                     ?          ?          ?          ?          ?          ?          ?
-Hybrid alpha=0.50                     ?          ?          ?          ?          ?          ?          ?
-Hybrid alpha=1.00                     ?          ?          ?          ?          ?          ?          ?
-Best Hybrid alpha=?                   ?          ?          ?          ?          ?          ?          ?
-Hybrid llm alpha=0.50                 ?          ?          ?          ?          ?          ?          ?
+Hybrid structured semantic            ?          ?          ?          ?          ?          ?          ?
+Best Hybrid structured semantic       ?          ?          ?          ?          ?          ?          ?
 No CF                                 ?          ?          ?          ?          ?          ?          ?
 No mood/drift                         ?          ?          ?          ?          ?          ?          ?
 No metadata                           ?          ?          ?          ?          ?          ?          ?
-No semantic labels                    ?          ?          ?          ?          ?          ?          ?
-No lyrics                             ?          ?          ?          ?          ?          ?          ?
+No structured semantic                ?          ?          ?          ?          ?          ?          ?
 ```
 
 Include data stats above the result table so results are interpretable.
@@ -826,7 +828,7 @@ Gemma 3 LLM run:
 pushd <project-folder>
 python -m huggingface_hub.cli.hf auth login
 python .\install_llm.py --cuda-torch --device cuda
-python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 2 --require-semantic-coverage --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 100 --alpha-grid-step 0.5 --emotion-limit 0 --lyrics-weight 0.0 --semantic-weight 0.05 --progress-interval 25
+python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 10 --require-semantic-coverage --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --emotion-limit 0 --semantic-weight 0.15 --progress-interval 25
 ```
 
 LLM semantic progress should report `semantic songs done/total`, cached profiles, batch size, speed, elapsed time, and ETA. Keep warning noise hidden; if a warning appears, treat it as an implementation bug to clean up unless it is an actual model loading failure.
@@ -837,12 +839,12 @@ The project should progress in this order:
 
 ```text
 1. Verify data and join coverage.
-2. Build measurable lyrics TF-IDF baseline.
+2. Build measurable CF + popularity baseline.
 3. Add popularity baseline.
 4. Add co-occurrence CF baseline.
 5. Tune Stage 1 by Retrieval@300.
 6. Tune Stage 2 by Recall@10 and NDCG@10.
-7. Only then add LLM emotion tags and mood drift.
+7. Only then add structured LLM semantic text and mood drift.
 ```
 
 Strong algorithms are built by separating the jobs:
