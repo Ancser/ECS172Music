@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from pathlib import Path
 from typing import Iterable
@@ -16,6 +18,26 @@ from typing import Iterable
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = ROOT / "data"
 DEFAULT_LYRICS_CSV = DEFAULT_DATA_DIR / "spotify_millsongdata.csv"
+
+MATCHED_COUNT_THRESHOLD_LABELS = (
+    ">= 1 song",
+    ">= 5 songs",
+    ">= 10 songs",
+    ">= 20 songs",
+    ">= 30 songs",
+    ">= 50 songs",
+    ">= 100 songs",
+)
+
+COVERAGE_THRESHOLD_LABELS = (
+    ">= 10% coverage",
+    ">= 20% coverage",
+    ">= 30% coverage",
+    ">= 50% coverage",
+    ">= 70% coverage",
+    ">= 90% coverage",
+    "100% coverage",
+)
 
 
 def section(title: str) -> None:
@@ -142,22 +164,161 @@ def print_bar_chart(counts: Counter[str], total: int, width: int = 48) -> None:
         print(f"  {label:>6} | {'#' * bar_len:<{width}} {count:>8,}  {pct:>6.2f}%")
 
 
-def scan_mpd(path: Path, lyrics_keys: set[str], max_playlists: int) -> dict[str, object]:
-    started = time.time()
-    total_playlists = 0
-    total_tracks = 0
-    matched_tracks = 0
-    empty_playlists = 0
-    full_playlists = 0
-    partial_playlists = 0
-    zero_match_playlists = 0
-    length_bins: Counter[str] = Counter()
-    matched_length_bins: Counter[str] = Counter()
-    unique_tracks: set[str] = set()
-    unique_matched_tracks: set[str] = set()
-    unique_missing_tracks: set[str] = set()
+def print_threshold_table(title: str, counts: dict[str, int], total: int) -> None:
+    section(title)
+    for label, count in counts.items():
+        print(f"  {label:<18} {percent_text(count, total)}")
 
-    for file_idx, json_path in enumerate(iter_mpd_files(path), start=1):
+
+def empty_mpd_stats(started: float | None = None) -> dict[str, object]:
+    return {
+        "started": time.time() if started is None else started,
+        "total_playlists": 0,
+        "total_tracks": 0,
+        "matched_tracks": 0,
+        "empty_playlists": 0,
+        "full_playlists": 0,
+        "partial_playlists": 0,
+        "zero_match_playlists": 0,
+        "length_bins": Counter(),
+        "matched_length_bins": Counter(),
+        "unique_tracks": set(),
+        "unique_matched_tracks": set(),
+        "unique_missing_tracks": set(),
+        "matched_count_thresholds": {label: 0 for label in MATCHED_COUNT_THRESHOLD_LABELS},
+        "coverage_thresholds": {label: 0 for label in COVERAGE_THRESHOLD_LABELS},
+    }
+
+
+def update_stats_for_playlist(stats: dict[str, object], playlist: dict[str, object], lyrics_keys: set[str]) -> None:
+    tracks = playlist.get("tracks", [])
+    if not isinstance(tracks, list):
+        tracks = []
+    length = len(tracks)
+    matched = 0
+    stats["total_playlists"] = int(stats["total_playlists"]) + 1
+    stats["total_tracks"] = int(stats["total_tracks"]) + length
+    stats["length_bins"][playlist_length_bin(length)] += 1  # type: ignore[index]
+    if length == 0:
+        stats["empty_playlists"] = int(stats["empty_playlists"]) + 1
+
+    unique_tracks: set[str] = stats["unique_tracks"]  # type: ignore[assignment]
+    unique_matched_tracks: set[str] = stats["unique_matched_tracks"]  # type: ignore[assignment]
+    unique_missing_tracks: set[str] = stats["unique_missing_tracks"]  # type: ignore[assignment]
+    for track in tracks:
+        title = track.get("track_name") or track.get("name") or track.get("title") or ""
+        artist = track.get("artist_name") or track.get("artist") or ""
+        key = song_key(str(title), str(artist))
+        if not key or key == "::":
+            continue
+        unique_tracks.add(key)
+        if key in lyrics_keys:
+            matched += 1
+            unique_matched_tracks.add(key)
+        else:
+            unique_missing_tracks.add(key)
+
+    stats["matched_tracks"] = int(stats["matched_tracks"]) + matched
+    stats["matched_length_bins"][playlist_length_bin(matched)] += 1  # type: ignore[index]
+    coverage = matched / length if length else 0.0
+    matched_thresholds: dict[str, int] = stats["matched_count_thresholds"]  # type: ignore[assignment]
+    coverage_thresholds: dict[str, int] = stats["coverage_thresholds"]  # type: ignore[assignment]
+    if matched >= 1:
+        matched_thresholds[">= 1 song"] += 1
+    if matched >= 5:
+        matched_thresholds[">= 5 songs"] += 1
+    if matched >= 10:
+        matched_thresholds[">= 10 songs"] += 1
+    if matched >= 20:
+        matched_thresholds[">= 20 songs"] += 1
+    if matched >= 30:
+        matched_thresholds[">= 30 songs"] += 1
+    if matched >= 50:
+        matched_thresholds[">= 50 songs"] += 1
+    if matched >= 100:
+        matched_thresholds[">= 100 songs"] += 1
+    if coverage >= 0.10:
+        coverage_thresholds[">= 10% coverage"] += 1
+    if coverage >= 0.20:
+        coverage_thresholds[">= 20% coverage"] += 1
+    if coverage >= 0.30:
+        coverage_thresholds[">= 30% coverage"] += 1
+    if coverage >= 0.50:
+        coverage_thresholds[">= 50% coverage"] += 1
+    if coverage >= 0.70:
+        coverage_thresholds[">= 70% coverage"] += 1
+    if coverage >= 0.90:
+        coverage_thresholds[">= 90% coverage"] += 1
+    if length and matched == length:
+        coverage_thresholds["100% coverage"] += 1
+        stats["full_playlists"] = int(stats["full_playlists"]) + 1
+    elif matched == 0:
+        stats["zero_match_playlists"] = int(stats["zero_match_playlists"]) + 1
+    else:
+        stats["partial_playlists"] = int(stats["partial_playlists"]) + 1
+
+
+def merge_mpd_stats(target: dict[str, object], source: dict[str, object]) -> None:
+    for key in (
+        "total_playlists",
+        "total_tracks",
+        "matched_tracks",
+        "empty_playlists",
+        "full_playlists",
+        "partial_playlists",
+        "zero_match_playlists",
+    ):
+        target[key] = int(target[key]) + int(source[key])
+    target["length_bins"].update(source["length_bins"])  # type: ignore[union-attr]
+    target["matched_length_bins"].update(source["matched_length_bins"])  # type: ignore[union-attr]
+    target["unique_tracks"].update(source["unique_tracks"])  # type: ignore[union-attr]
+    target["unique_matched_tracks"].update(source["unique_matched_tracks"])  # type: ignore[union-attr]
+    target["unique_missing_tracks"].update(source["unique_missing_tracks"])  # type: ignore[union-attr]
+    for label in MATCHED_COUNT_THRESHOLD_LABELS:
+        target["matched_count_thresholds"][label] += source["matched_count_thresholds"][label]  # type: ignore[index]
+    for label in COVERAGE_THRESHOLD_LABELS:
+        target["coverage_thresholds"][label] += source["coverage_thresholds"][label]  # type: ignore[index]
+
+
+def scan_mpd_file(json_path: Path, lyrics_keys: set[str]) -> dict[str, object]:
+    stats = empty_mpd_stats()
+    with json_path.open("r", encoding="utf-8", errors="replace") as f:
+        if json_path.suffix.lower() == ".jsonl":
+            raw_playlists = (json.loads(line) for line in f if line.strip())
+        else:
+            data = json.load(f)
+            raw_playlists = data.get("playlists", data if isinstance(data, list) else [])
+        for playlist in raw_playlists:
+            update_stats_for_playlist(stats, playlist, lyrics_keys)
+    return stats
+
+
+def scan_mpd(path: Path, lyrics_keys: set[str], max_playlists: int, workers: int) -> dict[str, object]:
+    started = time.time()
+    stats = empty_mpd_stats(started)
+    files = list(iter_mpd_files(path))
+
+    if workers > 1 and not max_playlists and len(files) > 1:
+        print(f"  workers={workers:,} files={len(files):,}")
+        completed = 0
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(scan_mpd_file, json_path, lyrics_keys): json_path for json_path in files}
+            for future in as_completed(futures):
+                merge_mpd_stats(stats, future.result())
+                completed += 1
+                if completed == 1 or completed % 25 == 0 or completed == len(files):
+                    elapsed = time.time() - started
+                    print(
+                        f"  scanned files={completed:,}/{len(files):,} "
+                        f"playlists={int(stats['total_playlists']):,} elapsed={elapsed:.1f}s",
+                        flush=True,
+                    )
+        return stats
+
+    if workers > 1 and max_playlists:
+        print("  workers disabled for --max-playlists so the sample size stays exact.")
+
+    for file_idx, json_path in enumerate(files, start=1):
         with json_path.open("r", encoding="utf-8", errors="replace") as f:
             if json_path.suffix.lower() == ".jsonl":
                 raw_playlists = (json.loads(line) for line in f if line.strip())
@@ -166,74 +327,16 @@ def scan_mpd(path: Path, lyrics_keys: set[str], max_playlists: int) -> dict[str,
                 raw_playlists = data.get("playlists", data if isinstance(data, list) else [])
 
             for playlist in raw_playlists:
-                tracks = playlist.get("tracks", [])
-                length = len(tracks)
-                matched = 0
-                total_playlists += 1
-                total_tracks += length
-                length_bins[playlist_length_bin(length)] += 1
-                if length == 0:
-                    empty_playlists += 1
+                update_stats_for_playlist(stats, playlist, lyrics_keys)
 
-                for track in tracks:
-                    title = track.get("track_name") or track.get("name") or track.get("title") or ""
-                    artist = track.get("artist_name") or track.get("artist") or ""
-                    key = song_key(title, artist)
-                    if not key or key == "::":
-                        continue
-                    unique_tracks.add(key)
-                    if key in lyrics_keys:
-                        matched += 1
-                        unique_matched_tracks.add(key)
-                    else:
-                        unique_missing_tracks.add(key)
-
-                matched_tracks += matched
-                matched_length_bins[playlist_length_bin(matched)] += 1
-                if length and matched == length:
-                    full_playlists += 1
-                elif matched == 0:
-                    zero_match_playlists += 1
-                else:
-                    partial_playlists += 1
-
-                if max_playlists and total_playlists >= max_playlists:
-                    return {
-                        "started": started,
-                        "total_playlists": total_playlists,
-                        "total_tracks": total_tracks,
-                        "matched_tracks": matched_tracks,
-                        "empty_playlists": empty_playlists,
-                        "full_playlists": full_playlists,
-                        "partial_playlists": partial_playlists,
-                        "zero_match_playlists": zero_match_playlists,
-                        "length_bins": length_bins,
-                        "matched_length_bins": matched_length_bins,
-                        "unique_tracks": unique_tracks,
-                        "unique_matched_tracks": unique_matched_tracks,
-                        "unique_missing_tracks": unique_missing_tracks,
-                        "last_file_idx": file_idx,
-                    }
+                if max_playlists and int(stats["total_playlists"]) >= max_playlists:
+                    return stats
 
         if file_idx == 1 or file_idx % 25 == 0:
             elapsed = time.time() - started
-            print(f"  scanned files={file_idx:,} playlists={total_playlists:,} elapsed={elapsed:.1f}s", flush=True)
+            print(f"  scanned files={file_idx:,} playlists={int(stats['total_playlists']):,} elapsed={elapsed:.1f}s", flush=True)
 
-    return {
-        "started": started,
-        "total_playlists": total_playlists,
-        "total_tracks": total_tracks,
-        "matched_tracks": matched_tracks,
-        "empty_playlists": empty_playlists,
-        "full_playlists": full_playlists,
-        "partial_playlists": partial_playlists,
-        "zero_match_playlists": zero_match_playlists,
-        "length_bins": length_bins,
-        "matched_length_bins": matched_length_bins,
-        "unique_tracks": unique_tracks,
-        "unique_matched_tracks": unique_matched_tracks,
-        "unique_missing_tracks": unique_missing_tracks,
-    }
+    return stats
 
 
 def parse_args() -> argparse.Namespace:
@@ -241,6 +344,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lyrics-csv", type=Path, default=DEFAULT_LYRICS_CSV)
     parser.add_argument("--mpd-path", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--max-playlists", type=int, default=0, help="0 means scan all playlists")
+    parser.add_argument("--workers", type=int, default=max(1, min(8, (os.cpu_count() or 2))), help="Thread workers for full MPD scan; exact --max-playlists samples run single-threaded")
     parser.add_argument("--songs-only", action="store_true", help="Only scan the lyrics CSV song fields")
     return parser.parse_args()
 
@@ -252,6 +356,7 @@ def main() -> None:
     print(f"  lyrics_csv:     {args.lyrics_csv}")
     print(f"  mpd_path:       {args.mpd_path}")
     print(f"  max_playlists:  {args.max_playlists or 'all'}")
+    print(f"  workers:        {args.workers}")
 
     section("Loading lyrics catalog")
     lyrics_keys, lyrics_stats = load_lyrics_keys(args.lyrics_csv)
@@ -268,7 +373,7 @@ def main() -> None:
         return
 
     section("Scanning MPD playlists")
-    stats = scan_mpd(args.mpd_path, lyrics_keys, args.max_playlists)
+    stats = scan_mpd(args.mpd_path, lyrics_keys, args.max_playlists, max(1, args.workers))
     elapsed = time.time() - float(stats["started"])
 
     total_playlists = int(stats["total_playlists"])
@@ -291,6 +396,18 @@ def main() -> None:
     print(f"  unique MPD songs matched:    {percent_text(len(unique_matched_tracks), len(unique_tracks))}")
     print(f"  unique MPD songs missing:    {percent_text(len(unique_missing_tracks), len(unique_tracks))}")
     print(f"  elapsed:                     {elapsed:.1f}s")
+
+    print_threshold_table(
+        "Playlist filter by matched song count",
+        stats["matched_count_thresholds"],
+        total_playlists,
+    )
+
+    print_threshold_table(
+        "Playlist filter by matched coverage percent",
+        stats["coverage_thresholds"],
+        total_playlists,
+    )
 
     section("Playlist length bar chart")
     print("  Original MPD playlist length")

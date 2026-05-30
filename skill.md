@@ -60,11 +60,10 @@ Default web recommendation controls are `batch=20` and `candidates=200`, because
 For data coverage review:
 
 ```powershell
-pushd <project-folder>
-.\dataScan.cmd
+python F:\ancserProject\ECS172Music\dataScan.py
 ```
 
-Use `.\dataScan.cmd --max-playlists 1000` for a quick sample. The scan should report MPD track coverage against the lyrics catalog as `(matched/total) percent`, playlist full/partial/zero-match counts, and playlist length bar charts for original MPD length and matched-song count.
+Use `python F:\ancserProject\ECS172Music\dataScan.py --max-playlists 1000` for a quick sample. Use `python F:\ancserProject\ECS172Music\dataScan.py --workers 8` for a full multi-threaded MPD scan. The scan should report MPD track coverage against the lyrics catalog as `(matched/total) percent`, playlist full/partial/zero-match counts, playlist filters by matched song count and matched coverage percent, and playlist length bar charts for original MPD length and matched-song count.
 
 For a quick no-data demo:
 

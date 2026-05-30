@@ -666,15 +666,19 @@ python .\download_data.py --playlists
 Scan MPD playlist coverage against the lyrics catalog:
 
 ```bat
-pushd <project-folder>
-.\dataScan.cmd
+python F:\ancserProject\ECS172Music\dataScan.py
 ```
 
 For a faster sample scan:
 
 ```bat
-pushd <project-folder>
-.\dataScan.cmd --max-playlists 1000
+python F:\ancserProject\ECS172Music\dataScan.py --max-playlists 1000
+```
+
+For full MPD scan, use multiple workers:
+
+```bat
+python F:\ancserProject\ECS172Music\dataScan.py --workers 8
 ```
 
 
