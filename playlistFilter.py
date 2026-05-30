@@ -9,7 +9,7 @@ import json
 import time
 from pathlib import Path
 
-from dataMarker import COVERAGE_FIELD, DEFAULT_MARKED_DIR, MATCH_COUNT_FIELD, mark_playlist
+from playlistMarker import COVERAGE_FIELD, DEFAULT_MARKED_DIR, MATCH_COUNT_FIELD, mark_playlist
 from dataScan import DEFAULT_LYRICS_CSV, ROOT, iter_mpd_files, load_lyrics_keys, percent_text, section, song_key
 
 
@@ -17,9 +17,9 @@ DEFAULT_OUTPUT_DIR = ROOT / "dataFiltered"
 
 
 FILTERS = {
-    "playlists_50songs_50coverage.csv": lambda matched, coverage: matched >= 50 and coverage >= 50,
-    "playlists_50songs.csv": lambda matched, coverage: matched >= 50,
-    "playlists_50coverage.csv": lambda matched, coverage: coverage >= 50,
+    "spotify_playlist_50percent_50item.csv": lambda matched, coverage: matched >= 50 and coverage >= 50,
+    "spotify_playlist_50item.csv": lambda matched, coverage: matched >= 50,
+    "spotify_playlist_50percent.csv": lambda matched, coverage: coverage >= 50,
 }
 
 
@@ -82,7 +82,7 @@ def main() -> None:
     args = parse_args()
     started = time.time()
 
-    section("Data extract inputs")
+    section("Playlist filter inputs")
     print(f"  lyrics_csv: {args.lyrics_csv}")
     print(f"  mpd_path:   {args.mpd_path}")
     print(f"  out_dir:    {args.out_dir}")
@@ -105,7 +105,7 @@ def main() -> None:
     total_matched_tracks = 0
     total_tracks = 0
 
-    section("Extracting filtered CSVs")
+    section("Filtering playlist CSVs")
     try:
         mpd_files = list(iter_mpd_files(args.mpd_path))
         if args.max_files:
@@ -143,7 +143,7 @@ def main() -> None:
         for handle in files.values():
             handle.close()
 
-    section("Extract summary")
+    section("Playlist filter summary")
     print(f"  playlists scanned:       {total_playlists:,}")
     print(f"  matched track entries:   {percent_text(total_matched_tracks, total_tracks)}")
     for name, path in output_paths.items():

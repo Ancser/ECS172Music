@@ -42,7 +42,10 @@ STOPWORDS = {
 }
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = ROOT / "data"
+DEFAULT_FILTERED_DIR = ROOT / "dataFiltered"
 DEFAULT_LYRICS_CSV = DEFAULT_DATA_DIR / "spotify_millsongdata.csv"
+DEFAULT_FILTERED_PLAYLIST_CSV = DEFAULT_FILTERED_DIR / "spotify_playlist_50percent_50item.csv"
+DEFAULT_SEMANTIC_SONG_CSV = DEFAULT_FILTERED_DIR / "spotify_song_llm_semantic.csv"
 DEFAULT_LLM_CACHE_DIR = ROOT / "models" / "llm_cache"
 DEFAULT_SEMANTIC_CACHE_DIR = ROOT / "models" / "semantic_cache"
 DEFAULT_LLM_MODEL = "google/gemma-3-270m-it"
@@ -566,6 +569,7 @@ def build_llm_song_features(
     model_name: str,
     llm_cache_dir: Path,
     semantic_cache_dir: Path,
+    seed_profiles: dict[str, SemanticProfile] | None,
     max_chars: int,
     limit: int,
     progress_interval: int,
@@ -576,6 +580,8 @@ def build_llm_song_features(
 ) -> tuple[dict[str, SongFeature], dict[str, SemanticProfile]]:
     cache_path = semantic_cache_path(semantic_cache_dir, model_name)
     profiles = read_semantic_profile_cache(cache_path)
+    if seed_profiles:
+        profiles.update(seed_profiles)
     missing_ids = [song_id for song_id in songs if song_id not in profiles]
     if limit > 0:
         missing_ids = missing_ids[:limit]
@@ -1234,97 +1240,11 @@ def print_section(title: str) -> None:
     print("=" * 20)
 
 
-def print_dataset_study(songs: dict[str, Song], playlists: list[tuple[str, list[str]]], cases: list[EvalCase]) -> None:
-    lengths = [len(tracks) for _, tracks in playlists]
-    matched_tracks = sum(lengths)
-    users = len(playlists)
-    catalog = len(songs)
-    density = matched_tracks / (users * catalog) if users and catalog else 0.0
-    observed_lengths = [len(case.observed) for case in cases]
-    heldout_lengths = [len(case.heldout) for case in cases]
-    print_section("Dataset study")
-    print(f"  songs with lyrics:       {len(songs):,}")
-    print(f"  matched playlists:       {len(playlists):,}")
-    print(f"  eval playlists:          {len(cases):,}")
-    print(f"  matched interactions:    {matched_tracks:,}")
-    print(f"  matrix density:          {density:.6f}")
-    if observed_lengths:
-        sorted_lengths = sorted(observed_lengths)
-        median = sorted_lengths[len(sorted_lengths) // 2]
-        cold = sum(1 for n in observed_lengths if n <= 3)
-        print(f"  avg observed length:     {sum(observed_lengths) / len(observed_lengths):.2f}")
-        print(f"  median observed length:  {median}")
-        sorted_heldout = sorted(heldout_lengths)
-        print(f"  avg heldout length:      {sum(heldout_lengths) / len(heldout_lengths):.2f}")
-        print(f"  median heldout length:   {sorted_heldout[len(sorted_heldout) // 2]}")
-        print(f"  min/max heldout length:  {min(heldout_lengths)} / {max(heldout_lengths)}")
-        print(f"  cold playlists <= 3:     {cold:,}")
-
-
 def preview_text(value: str, limit: int = 90) -> str:
     compact = re.sub(r"\s+", " ", value or "").strip()
     if len(compact) <= limit:
         return compact
     return compact[: limit - 3] + "..."
-
-
-def print_song_head(songs: dict[str, Song], limit: int = 10) -> None:
-    print_section("Song example")
-    song = next(iter(songs.values()), None)
-    if not song:
-        print("  No songs loaded.")
-        return
-    print(f"  song_id: {song.song_id}")
-    print(f"  title:   {song.title}")
-    print(f"  artist:  {song.artist}")
-    print("  lyrics:")
-    print(f"    {preview_text(song.lyrics, limit=240)}")
-
-
-def print_playlist_head(
-    playlists: list[tuple[str, list[str]]],
-    songs: dict[str, Song],
-    limit: int = 10,
-    track_limit: int = 10,
-) -> None:
-    print_section("Playlist example")
-    if not playlists:
-        print("  No playlist data loaded yet.")
-        return
-    playlist_id, track_ids = playlists[0]
-    print(f"  playlist_id: {playlist_id}")
-    print(f"  tracks:      {len(track_ids)}")
-    print("  song list:")
-    for idx, song_id in enumerate(track_ids[:track_limit], start=1):
-        song = songs.get(song_id)
-        label = f"{song.title} / {song.artist}" if song else song_id
-        print(f"    {idx:>2}. {label}")
-    if len(track_ids) > track_limit:
-        print(f"    ... {len(track_ids) - track_limit:,} more tracks not shown")
-
-
-def print_all_data_stats(songs: dict[str, Song], playlists: list[tuple[str, list[str]]]) -> None:
-    playlist_lengths = [len(track_ids) for _, track_ids in playlists]
-    unique_playlist_tracks = {song_id for _, track_ids in playlists for song_id in track_ids}
-    lyric_token_counts = [len(tokenize(song.lyrics)) for song in songs.values()]
-    print_section("All loaded data stats")
-    print(f"  song lyric rows:         {len(songs):,}")
-    print(f"  playlists loaded:        {len(playlists):,}")
-    print(f"  matched playlist tracks: {sum(playlist_lengths):,}")
-    print(f"  unique matched tracks:   {len(unique_playlist_tracks):,}")
-    if playlist_lengths:
-        sorted_lengths = sorted(playlist_lengths)
-        print(f"  avg playlist length:     {sum(playlist_lengths) / len(playlist_lengths):.2f}")
-        print(f"  median playlist length:  {sorted_lengths[len(sorted_lengths) // 2]}")
-        print(f"  min playlist length:     {min(playlist_lengths)}")
-        print(f"  max playlist length:     {max(playlist_lengths)}")
-    if lyric_token_counts:
-        sorted_tokens = sorted(lyric_token_counts)
-        print(f"  avg lyric tokens:        {sum(lyric_token_counts) / len(lyric_token_counts):.2f}")
-        print(f"  median lyric tokens:     {sorted_tokens[len(sorted_tokens) // 2]}")
-        print(f"  min lyric tokens:        {min(lyric_token_counts)}")
-        print(f"  max lyric tokens:        {max(lyric_token_counts)}")
-
 
 def describe_song(song_id: str, songs: dict[str, Song], features: dict[str, SongFeature]) -> str:
     song = songs[song_id]
@@ -1398,6 +1318,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lyrics-csv", type=Path, help="Spotify Million Song lyrics CSV")
     parser.add_argument("--mpd-path", type=Path, help="MPD JSON file/directory with playlists")
     parser.add_argument("--playlist-csv", type=Path, help="Alternative simple playlist CSV")
+    parser.add_argument("--semantic-song-csv", type=Path, default=DEFAULT_SEMANTIC_SONG_CSV, help="Optional precomputed song semantic CSV from songSemantic.py")
     parser.add_argument("--demo", action="store_true", help="Force the tiny built-in demo instead of repo data")
     parser.add_argument("--max-playlists", type=int, default=1000)
     parser.add_argument("--max-eval-cases", type=int, default=1000, help="Cap validation playlists after splitting; 0 means no cap")
@@ -1448,6 +1369,8 @@ def default_mpd_path() -> Path | None:
 
 
 def default_playlist_csv() -> Path | None:
+    if DEFAULT_FILTERED_PLAYLIST_CSV.exists():
+        return DEFAULT_FILTERED_PLAYLIST_CSV
     for name in ("playlists.csv", "playlist.csv"):
         path = DEFAULT_DATA_DIR / name
         if path.exists():
@@ -1468,9 +1391,9 @@ def main() -> None:
         if not args.lyrics_csv and DEFAULT_LYRICS_CSV.exists():
             args.lyrics_csv = DEFAULT_LYRICS_CSV
         if not args.mpd_path and not args.playlist_csv:
-            args.mpd_path = default_mpd_path()
-            if not args.mpd_path:
-                args.playlist_csv = default_playlist_csv()
+            args.playlist_csv = default_playlist_csv()
+            if not args.playlist_csv:
+                args.mpd_path = default_mpd_path()
 
     if not args.demo and args.lyrics_csv:
         songs = load_lyrics_csv(args.lyrics_csv)
@@ -1487,13 +1410,9 @@ def main() -> None:
         args.min_df = 1
         args.pool_size = min(args.pool_size, 20)
 
-    print_song_head(songs, limit=10)
-    print_playlist_head(playlists, songs, limit=10)
-    print_all_data_stats(songs, playlists)
-
     if not playlists:
         print()
-        print("No playlist data found under data/. Put MPD mpd.slice.*.json files in data/ or pass --mpd-path.")
+        print("No playlist data found. Run playlistFilter.py or pass --playlist-csv/--mpd-path.")
         return
 
     cases = split_playlists(playlists, args.min_playlist_len, args.holdout_k)
@@ -1508,16 +1427,30 @@ def main() -> None:
     catalog = set(songs)
     popularity = popularity_counts(cases)
 
-    print_dataset_study(songs, playlists, cases)
+    print_section("Algorithm input")
+    if args.playlist_csv:
+        print(f"  playlist_csv:       {args.playlist_csv}")
+    elif args.mpd_path:
+        print(f"  mpd_path:           {args.mpd_path}")
+    print(f"  eval playlists:     {len(cases):,}")
+    print(f"  eval songs:         {len(songs):,}")
+    print(f"  heldout per list:   {args.holdout_k}")
+    print(f"  candidate pool:     {args.pool_size}")
     print_section("Building song feature table")
     features = build_song_features(songs)
     semantic_profiles: dict[str, SemanticProfile] = {}
     if args.emotion_source == "llm":
+        seed_profiles: dict[str, SemanticProfile] = {}
+        if args.semantic_song_csv and args.semantic_song_csv.exists():
+            seed_profiles = read_semantic_profile_cache(args.semantic_song_csv)
+            seed_profiles = {song_id: profile for song_id, profile in seed_profiles.items() if song_id in songs}
+            print(f"  precomputed semantics: {len(seed_profiles):,} from {args.semantic_song_csv}")
         _, semantic_profiles = build_llm_song_features(
             songs=songs,
             model_name=args.llm_model,
             llm_cache_dir=args.llm_cache_dir,
             semantic_cache_dir=args.semantic_cache_dir,
+            seed_profiles=seed_profiles,
             max_chars=args.emotion_max_chars,
             limit=args.emotion_limit,
             progress_interval=args.progress_interval,
@@ -1535,7 +1468,7 @@ def main() -> None:
                     "Rerun with --emotion-limit 0 or a larger limit, or omit --require-semantic-coverage for weak fallback."
                 )
             print(f"  LLM semantic profiles incomplete; semantic-text score disabled for {len(missing_semantic):,} songs.")
-    print(f"  emotion source:         {args.emotion_source}")
+    print(f"  semantic source:        {args.emotion_source}")
     type_counts = Counter(feature.primary_type for feature in features.values())
     language_counts = Counter(feature.language for feature in features.values())
     print("  top lyric types:         " + ", ".join(f"{k}={v:,}" for k, v in type_counts.most_common(5)))

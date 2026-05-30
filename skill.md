@@ -1,4 +1,4 @@
-# Music Recommendation Algorithm Workflow Skill
+﻿# Music Recommendation Algorithm Workflow Skill
 
 ## 0. Response Rule And First Run
 
@@ -9,7 +9,7 @@ At the end of every project response, include a short runnable command block tha
 
 Use a generic project folder placeholder in reusable docs:
 
-```powershell
+```cmd
 pushd <project-folder>
 ```
 
@@ -23,25 +23,29 @@ When answering in this conversation, use the real current folder in the final co
 
 First-time setup must download the playlist data before real validation can run:
 
-```powershell
+```cmd
 pushd <project-folder>
 python .\download_data.py --playlists
 ```
 
 After data exists, run the real data review / prototype:
 
-```powershell
+```cmd
 pushd <project-folder>
-python .\newSpotify.py --mpd-path .\data --lyrics-csv .\data\spotify_millsongdata.csv --max-playlists 1000 --max-eval-cases 1000 --holdout-k 10 --min-playlist-len 2 --time-decay 0.9 --progress-interval 100
+python .\playlistMarker.py --workers 4
+python .\playlistFilter.py
+python .\songSemantic.py --llm-device cuda --llm-batch-size 20
+python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 20 --require-semantic-coverage --lyrics-csv .\data\spotify_millsongdata.csv --playlist-csv .\dataFiltered\spotify_playlist_50percent_50item.csv --semantic-song-csv .\dataFiltered\spotify_song_llm_semantic.csv --max-playlists 1000 --max-eval-cases 1000 --holdout-k 10 --min-playlist-len 20 --pool-size 200 --emotion-limit 0 --semantic-weight 0.15 --progress-interval 25
 ```
 
 Optional Gemma 3 LLM setup and small comparison run:
 
-```powershell
+```cmd
 pushd <project-folder>
 python -m huggingface_hub.cli.hf auth login
 python .\install_llm.py --cuda-torch --device cuda
-python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 20 --require-semantic-coverage --mpd-path .\data --lyrics-csv .\data\spotify_millsongdata.csv --max-playlists 1000 --max-eval-cases 100 --holdout-k 10 --min-playlist-len 20 --pool-size 200 --emotion-limit 0 --semantic-weight 0.15 --progress-interval 25
+python .\songSemantic.py --llm-device cuda --llm-batch-size 20 --max-songs 200
+python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 20 --require-semantic-coverage --lyrics-csv .\data\spotify_millsongdata.csv --playlist-csv .\dataFiltered\spotify_playlist_50percent_50item.csv --semantic-song-csv .\dataFiltered\spotify_song_llm_semantic.csv --max-playlists 1000 --max-eval-cases 100 --holdout-k 10 --min-playlist-len 20 --pool-size 200 --emotion-limit 0 --semantic-weight 0.15 --progress-interval 25
 ```
 
 Default LLM model: `google/gemma-3-270m-it`.
@@ -50,7 +54,7 @@ Use `--require-semantic-coverage --emotion-limit 0` for final LLM runs, because 
 
 For the local Spotify-style web demo:
 
-```powershell
+```cmd
 pushd <project-folder>
 .\start_spotify_web.bat
 ```
@@ -59,7 +63,7 @@ Default web recommendation controls are `batch=20` and `candidates=200`, because
 
 For data coverage review:
 
-```powershell
+```cmd
 python F:\ancserProject\ECS172Music\dataScan.py
 ```
 
@@ -67,23 +71,31 @@ Use `python F:\ancserProject\ECS172Music\dataScan.py --max-playlists 1000` for a
 
 To cache coverage into marked MPD JSON copies once:
 
-```powershell
-python F:\ancserProject\ECS172Music\dataMarker.py --workers 4
+```cmd
+python F:\ancserProject\ECS172Music\playlistMarker.py --workers 4
 ```
 
 This reads original MPD JSON from `data/` and writes marked copies to `dataMarked/`; it must not modify original playlist data. It adds integer fields `matched_song_count` and `matched_coverage_percent` to each playlist object. Use `--dry-run --max-files 1` before a full write if testing.
 
 To extract filtered playlist-track CSV files:
 
-```powershell
-python F:\ancserProject\ECS172Music\dataFilter.py
+```cmd
+python F:\ancserProject\ECS172Music\playlistFilter.py
 ```
 
-This reads `dataMarked/` by default and creates `dataFiltered/playlists_50songs_50coverage.csv`, `dataFiltered/playlists_50songs.csv`, and `dataFiltered/playlists_50coverage.csv`.
+This reads `dataMarked/` by default and creates `dataFiltered/spotify_playlist_50percent_50item.csv`, `dataFiltered/spotify_playlist_50item.csv`, and `dataFiltered/spotify_playlist_50percent.csv`.
+
+To precompute song-level structured LLM semantic profiles:
+
+```cmd
+python F:\ancserProject\ECS172Music\songSemantic.py --llm-device cuda --llm-batch-size 20
+```
+
+This reads the union of songs from `dataFiltered/spotify_playlist_50item.csv` and `dataFiltered/spotify_playlist_50percent.csv`, then writes `dataFiltered/spotify_song_llm_semantic.csv`. The final `newSpotify.py` run can load that file; if a selected song is still missing, `newSpotify.py --emotion-source llm` should call the LLM only for missing songs.
 
 For a quick no-data demo:
 
-```powershell
+```cmd
 pushd <project-folder>
 python .\newSpotify.py --demo
 ```
@@ -688,7 +700,7 @@ Random
 Popularity
 Co-occurrence CF
 CF + popularity baseline
-Hybrid CF + metadata + mood + structured semantic text
+Hybrid CF + metadata + structured semantic text
 ```
 
 Later LLM variants:
@@ -696,7 +708,7 @@ Later LLM variants:
 ```text
 CF + Gemma 3 semantic training_text embedding
 CF + Gemma 3 Semantic ID / cluster
-mood drift ablation
+structured semantic ablation
 ```
 
 ### 6.2 Ablations
@@ -827,32 +839,33 @@ If lyrics improves coverage while keeping Recall@10 close, that is useful for th
 
 Current data review:
 
-```powershell
+```cmd
 pushd <project-folder>
 python .\newSpotify.py
 ```
 
 Demo full pipeline:
 
-```powershell
+```cmd
 pushd <project-folder>
 python .\newSpotify.py --demo
 ```
 
-Real MPD run after placing playlist slices in `data/`:
+Filtered playlist run after playlistMarker.py and playlistFilter.py:
 
-```powershell
+```cmd
 pushd <project-folder>
-python .\newSpotify.py --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --min-playlist-len 2 --holdout-k 10 --pool-size 300 --time-decay 0.9 --max-eval-cases 1000 --progress-interval 100
+python .\newSpotify.py --lyrics-csv .\data\spotify_millsongdata.csv --playlist-csv .\dataFiltered\spotify_playlist_50percent_50item.csv --max-playlists 1000 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --max-eval-cases 1000 --progress-interval 25
 ```
 
 Gemma 3 LLM run:
 
-```powershell
+```cmd
 pushd <project-folder>
 python -m huggingface_hub.cli.hf auth login
 python .\install_llm.py --cuda-torch --device cuda
-python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 20 --require-semantic-coverage --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --emotion-limit 0 --semantic-weight 0.15 --progress-interval 25
+python .\songSemantic.py --llm-device cuda --llm-batch-size 20
+python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 20 --require-semantic-coverage --lyrics-csv .\data\spotify_millsongdata.csv --playlist-csv .\dataFiltered\spotify_playlist_50percent_50item.csv --semantic-song-csv .\dataFiltered\spotify_song_llm_semantic.csv --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --emotion-limit 0 --semantic-weight 0.15 --progress-interval 25
 ```
 
 LLM semantic progress should report `semantic songs done/total`, cached profiles, batch size, speed, elapsed time, and ETA. Keep warning noise hidden; if a warning appears, treat it as an implementation bug to clean up unless it is an actual model loading failure.
@@ -868,7 +881,7 @@ The project should progress in this order:
 4. Add co-occurrence CF baseline.
 5. Tune Stage 1 by Retrieval@300.
 6. Tune Stage 2 by Recall@10 and NDCG@10.
-7. Only then add structured LLM semantic text and mood drift.
+7. Only then add structured LLM semantic text.
 ```
 
 Strong algorithms are built by separating the jobs:
@@ -879,6 +892,7 @@ Stage 1 finds enough plausible songs
 Stage 2 orders the best 10
 validation proves whether the change helped
 ```
+
 
 
 

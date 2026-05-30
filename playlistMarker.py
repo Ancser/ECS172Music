@@ -114,7 +114,7 @@ def main() -> None:
     args = parse_args()
     started = time.time()
 
-    section("Data filter inputs")
+    section("Playlist marker inputs")
     print(f"  lyrics_csv: {args.lyrics_csv}")
     print(f"  mpd_path:   {args.mpd_path}")
     print(f"  out_dir:    {args.out_dir}")

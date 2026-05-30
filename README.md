@@ -1,4 +1,4 @@
-# ECS172 Music Recommendation Project
+﻿# ECS172 Music Recommendation Project
 
 ## 1. Project Direction
 
@@ -22,7 +22,7 @@ The final system should combine:
 Current implementation has two paths:
 
 ```text
-Baseline path: CF + popularity + metadata + weak mood.
+Baseline path: CF + popularity + metadata.
 LLM path: CF + popularity candidates, then structured semantic-text reranking.
 Raw lyrics are not directly compared in the current LLM hybrid path.
 ```
@@ -67,7 +67,7 @@ data/mpd.slice.1000-1999.json
 
 Download the large Spotify Million Playlist Dataset once:
 
-```bat
+```cmd
 pushd <project-folder>
 python .\download_data.py --playlists
 ```
@@ -76,7 +76,7 @@ The downloader skips work if `data/mpd.slice.*.json` already exists.
 
 If `kagglehub` fails because of package mismatch, repair it with:
 
-```bat
+```cmd
 python -m pip install --user --upgrade --force-reinstall kagglehub==0.3.13
 ```
 
@@ -90,7 +90,7 @@ data/spotify_millsongdata.csv
 
 Launch the browser prototype:
 
-```bat
+```cmd
 pushd <project-folder>
 start_spotify_web.bat
 ```
@@ -99,7 +99,7 @@ The web app opens at `http://127.0.0.1:5050`. It indexes lyrics and MPD playlist
 
 For a faster classroom/demo index:
 
-```bat
+```cmd
 pushd <project-folder>
 start_spotify_web.bat --max-playlists 50000 --rebuild
 ```
@@ -183,7 +183,7 @@ cold playlists with <= 3 observed songs
 
 Run current data review:
 
-```bat
+```cmd
 pushd <project-folder>
 python .\newSpotify.py
 ```
@@ -441,14 +441,14 @@ check whether controlled semantic compression helps more than weak keyword tags
 
 Install/download/test:
 
-```bat
+```cmd
 pushd <project-folder>
 python .\install_llm.py
 ```
 
 For NVIDIA GPU acceleration on Windows, install CUDA PyTorch once:
 
-```bat
+```cmd
 pushd <project-folder>
 python .\install_llm.py --cuda-torch --device cuda
 ```
@@ -497,19 +497,19 @@ Semantic profile: themes=...; narrative=...; context=...; playlist_function=...;
 
 Run a small Gemma comparison first:
 
-```bat
+```cmd
 pushd <project-folder>
 python .\newSpotify.py --emotion-source llm --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --emotion-limit 200 --semantic-weight 0.15 --progress-interval 25
 ```
 
 Use `--llm-device cuda` after CUDA PyTorch is installed:
 
-```bat
+```cmd
 pushd <project-folder>
 python .\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 20 --require-semantic-coverage --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --emotion-limit 0 --semantic-weight 0.15 --progress-interval 25
 ```
 
-For pilot runs, keep `--emotion-limit` small and omit `--require-semantic-coverage`. For final LLM semantic experiments, use `--emotion-limit 0 --require-semantic-coverage` so every selected eval song has a structured semantic profile. Cached profiles are reused on later runs. The current semantic cache uses `structured_semantic_v3`, which stores structured semantic text and does not reuse older raw emotion caches. Raw lyrics are not directly compared in the current console hybrid path; Stage 1 uses CF + popularity candidates, and Stage 2 reranks with metadata, weak mood, and structured semantic-text similarity only where profiles exist. LLM profiling output is kept to one clear semantic progress line with rate, elapsed time, and ETA. On a 4 GB GPU, batch 20 worked locally; if CUDA runs out of memory, lower it.
+For pilot runs, keep `--emotion-limit` small and omit `--require-semantic-coverage`. For final LLM semantic experiments, use `songSemantic.py` first, then run `newSpotify.py` with `--emotion-limit 0 --require-semantic-coverage` so every selected eval song has a structured semantic profile. Cached profiles are reused on later runs. The current semantic cache uses `structured_semantic_v4`, which stores structured semantic text and does not reuse older raw emotion caches. Raw lyrics are not directly compared in the current console hybrid path; Stage 1 uses CF + popularity candidates, and Stage 2 reranks with metadata and structured semantic-text similarity only where profiles exist. LLM profiling output is kept to one clear semantic progress line with rate, elapsed time, and ETA. On a 4 GB GPU, batch 20 worked locally; if CUDA runs out of memory, lower it.
 
 Later embedding table:
 
@@ -539,7 +539,6 @@ score_emotion(candidate) = cosine(candidate_emotion_vector, projected_mood)
 This supports the proposal novelty:
 
 - LLM-as-emotion-teacher
-- mood drift extrapolation
 - adaptive dual-temporal fusion
 - optional knowledge distillation auxiliary task
 
@@ -552,7 +551,7 @@ Random
 Popularity
 Co-occurrence CF
 CF + popularity baseline
-Hybrid CF + metadata + mood + structured semantic text
+Hybrid CF + metadata + structured semantic text
 ```
 
 Later LLM variants:
@@ -560,7 +559,6 @@ Later LLM variants:
 ```text
 CF + Gemma 3 semantic training_text embedding
 CF + Gemma 3 Semantic ID / cluster
-with vs without mood drift
 learned fusion
 knowledge distillation
 ```
@@ -594,7 +592,7 @@ No structured semantic                ?          ?          ?          ?        
 ```
 
 `dRecall`, `dNDCG`, and `dProxy` are measured against `CF + popularity baseline`.
-Positive values mean the added metadata, weak mood, or structured semantic signal helped over the strongest simple recommender.
+Positive values mean the added metadata or structured semantic signal helped over the strongest simple recommender.
 Negative values mean that signal hurt ranking accuracy on that run.
 
 ## 10. Report Direction
@@ -635,73 +633,92 @@ Item2Vec: playlist sequence embedding baseline
 
 Run demo pipeline:
 
-```bat
+```cmd
 pushd <project-folder>
 python .\newSpotify.py --demo
 ```
 
 Run data review / real pipeline after playlist slices exist:
 
-```bat
+```cmd
 pushd <project-folder>
-python .\newSpotify.py --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --min-playlist-len 2 --holdout-k 10 --pool-size 300 --time-decay 0.9 --max-eval-cases 1000 --progress-interval 100
+python .\newSpotify.py --lyrics-csv .\data\spotify_millsongdata.csv --playlist-csv .\dataFiltered\spotify_playlist_50percent_50item.csv --max-playlists 1000 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --max-eval-cases 1000 --progress-interval 25
 ```
 
 Install and run the smallest Gemma 3 LLM comparison:
 
-```bat
+```cmd
 pushd <project-folder>
 python -m huggingface_hub.cli.hf auth login
 python .\install_llm.py
-python .\newSpotify.py --emotion-source llm --lyrics-csv .\data\spotify_millsongdata.csv --mpd-path .\data --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --emotion-limit 200 --semantic-weight 0.15 --progress-interval 25
+python .\newSpotify.py --emotion-source llm --lyrics-csv .\data\spotify_millsongdata.csv --playlist-csv .\dataFiltered\spotify_playlist_50percent_50item.csv --semantic-song-csv .\dataFiltered\spotify_song_llm_semantic.csv --max-playlists 1000 --max-eval-cases 100 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --emotion-limit 200 --semantic-weight 0.15 --progress-interval 25
 ```
 
 Download playlist data once:
 
-```bat
+```cmd
 pushd <project-folder>
 python .\download_data.py --playlists
 ```
 
 Scan MPD playlist coverage against the lyrics catalog:
 
-```bat
+```cmd
 python F:\ancserProject\ECS172Music\dataScan.py
 ```
 
 For a faster sample scan:
 
-```bat
+```cmd
 python F:\ancserProject\ECS172Music\dataScan.py --max-playlists 1000
 ```
 
 For full MPD scan, use multiple workers:
 
-```bat
+```cmd
 python F:\ancserProject\ECS172Music\dataScan.py --workers 8
 ```
 
 Create marked MPD JSON copies once with matched lyrics count and integer coverage percent:
 
-```bat
-python F:\ancserProject\ECS172Music\dataMarker.py --workers 4
+```cmd
+python F:\ancserProject\ECS172Music\playlistMarker.py --workers 4
 ```
 
 This reads original MPD files from `data/` and writes marked copies to `dataMarked/`. It does not modify the original playlist files.
 
 Extract filtered playlist-track CSVs:
 
-```bat
-python F:\ancserProject\ECS172Music\dataFilter.py
+```cmd
+python F:\ancserProject\ECS172Music\playlistFilter.py
 ```
 
 This writes:
 
 ```text
-dataFiltered/playlists_50songs_50coverage.csv
-dataFiltered/playlists_50songs.csv
-dataFiltered/playlists_50coverage.csv
+dataFiltered/spotify_playlist_50percent_50item.csv
+dataFiltered/spotify_playlist_50item.csv
+dataFiltered/spotify_playlist_50percent.csv
 ```
+
+Create the song-level semantic table for every song included in either the 50-item or 50-percent filtered playlist sets:
+
+```cmd
+python F:\ancserProject\ECS172Music\songSemantic.py --llm-device cuda --llm-batch-size 20
+```
+
+This writes:
+
+```text
+dataFiltered/spotify_song_llm_semantic.csv
+```
+
+Run the final algorithm on the strict 50-percent + 50-item playlist set:
+
+```cmd
+python F:\ancserProject\ECS172Music\newSpotify.py --emotion-source llm --llm-device cuda --llm-batch-size 20 --require-semantic-coverage --lyrics-csv F:\ancserProject\ECS172Music\data\spotify_millsongdata.csv --playlist-csv F:\ancserProject\ECS172Music\dataFiltered\spotify_playlist_50percent_50item.csv --semantic-song-csv F:\ancserProject\ECS172Music\dataFiltered\spotify_song_llm_semantic.csv --max-playlists 1000 --max-eval-cases 1000 --min-playlist-len 20 --holdout-k 10 --pool-size 200 --emotion-limit 0 --semantic-weight 0.15 --progress-interval 25
+```
+
 
 
 
