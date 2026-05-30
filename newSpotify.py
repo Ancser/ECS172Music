@@ -31,6 +31,15 @@ from typing import Iterable
 
 
 TOKEN_RE = re.compile(r"[a-z][a-z']+")
+STOPWORDS = {
+    "the", "and", "you", "your", "for", "with", "that", "this", "are", "was", "were", "from",
+    "have", "has", "had", "but", "not", "all", "can", "just", "like", "into", "out", "our",
+    "his", "her", "she", "him", "they", "them", "their", "what", "when", "where", "why",
+    "how", "who", "will", "would", "could", "should", "there", "here", "been", "being",
+    "about", "after", "before", "over", "under", "again", "then", "than", "too", "very",
+    "get", "got", "let", "make", "made", "say", "said", "see", "know", "come", "go",
+    "one", "two", "yes", "yeah", "oh", "hey", "la", "na", "woo", "ooh", "ah",
+}
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA_DIR = ROOT / "data"
 DEFAULT_LYRICS_CSV = DEFAULT_DATA_DIR / "spotify_millsongdata.csv"
@@ -435,12 +444,44 @@ def fallback_semantic_profile(song: Song, language: str) -> SemanticProfile:
     return normalize_semantic_profile(payload, language=language, source="fallback_keyword")
 
 
+def extract_json_object(text: str) -> str:
+    text = (text or "").strip()
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+    if fence:
+        return fence.group(1)
+    start = text.find("{")
+    if start < 0:
+        return ""
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(text)):
+        char = text[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : idx + 1]
+    return ""
+
+
 def parse_llm_semantic_profile(text: str, language: str, song: Song) -> SemanticProfile:
     payload: dict[str, object] = {}
-    match = re.search(r"\{.*?\}", text, flags=re.DOTALL)
-    if match:
+    json_text = extract_json_object(text)
+    if json_text:
         try:
-            loaded = json.loads(match.group(0))
+            loaded = json.loads(json_text)
             if isinstance(loaded, dict):
                 payload = loaded
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -454,11 +495,14 @@ def llm_prompt(song: Song, max_chars: int) -> str:
     lyrics = song.lyrics[:max_chars].replace("\r", " ").replace("\n", " ")
     return (
         "Create a controlled song semantic profile for a music recommender. "
-        "Return valid JSON only. Do not recommend songs. Do not output raw emotion labels or numeric scores. "
+        "Return exactly one minified JSON object. No markdown. No explanation. No recommendations. "
+        "Do not output raw emotion labels or numeric scores. "
         "Do not repeat the song title or artist in any value. Use compact English phrases, not paragraphs.\n"
         "Required keys: semantic_summary, themes, lyrical_narrative, listening_context, playlist_function, transition_note, keywords.\n"
-        "themes must be exactly 3 short phrases. keywords must be exactly 5 short phrases. "
-        "semantic_summary must describe lyrical meaning and playlist use in under 16 words.\n"
+        "themes must be an array of exactly 3 short phrases. keywords must be an array of exactly 5 short phrases. "
+        "Every value must be under 8 words and grounded in the title or lyrics. "
+        "Do not copy generic examples. Do not use regret/desire/memory unless those ideas are clearly in the song.\n"
+        'JSON schema: {"semantic_summary":string,"themes":[string,string,string],"lyrical_narrative":string,"listening_context":string,"playlist_function":string,"transition_note":string,"keywords":[string,string,string,string,string]}\n'
         f"Artist: {song.artist}\n"
         f"Title: {song.title}\n"
         f"Lyrics: {lyrics}\n"
@@ -1370,7 +1414,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--emotion-source", choices=["weak", "llm"], default="weak")
     parser.add_argument("--emotion-max-chars", type=int, default=1200)
     parser.add_argument("--emotion-limit", type=int, default=0, help="Only tag this many missing songs; 0 means all missing songs")
-    parser.add_argument("--llm-max-new-tokens", type=int, default=96)
+    parser.add_argument("--llm-max-new-tokens", type=int, default=320)
     parser.add_argument("--llm-batch-size", type=int, default=1, help="Batch LLM semantic profiling prompts; try 2 on 4GB GPUs")
     parser.add_argument("--llm-debug-output", type=int, default=0, help="Print raw LLM output for the first N newly profiled songs")
     parser.add_argument("--require-semantic-coverage", action="store_true", help="Fail instead of using weak fallback if any selected eval song lacks LLM semantic profile")
@@ -1497,11 +1541,13 @@ def main() -> None:
     print("  top lyric types:         " + ", ".join(f"{k}={v:,}" for k, v in type_counts.most_common(5)))
     print("  languages:               " + ", ".join(f"{k}={v:,}" for k, v in language_counts.most_common(5)))
     if semantic_profiles:
+        source_counts = Counter(profile.source for profile in semantic_profiles.values())
         theme_counts: Counter[str] = Counter()
         role_counts: Counter[str] = Counter()
         for profile in semantic_profiles.values():
             theme_counts.update(profile.themes)
             role_counts[profile.playlist_function] += 1
+        print("  semantic sources:       " + ", ".join(f"{k}={v:,}" for k, v in source_counts.most_common()))
         print("  top semantic themes:     " + ", ".join(f"{k}={v:,}" for k, v in theme_counts.most_common(5)))
         print("  playlist functions:      " + ", ".join(f"{k}={v:,}" for k, v in role_counts.most_common(5)))
         print_semantic_examples(songs, semantic_profiles, limit=5)
