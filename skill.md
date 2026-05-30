@@ -65,6 +65,22 @@ python F:\ancserProject\ECS172Music\dataScan.py
 
 Use `python F:\ancserProject\ECS172Music\dataScan.py --max-playlists 1000` for a quick sample. Use `python F:\ancserProject\ECS172Music\dataScan.py --workers 8` for a full multi-threaded MPD scan. The scan should report MPD track coverage against the lyrics catalog as `(matched/total) percent`, playlist full/partial/zero-match counts, playlist filters by matched song count and matched coverage percent, and playlist length bar charts for original MPD length and matched-song count.
 
+To cache coverage into marked MPD JSON copies once:
+
+```powershell
+python F:\ancserProject\ECS172Music\dataFilter.py --workers 4
+```
+
+This reads original MPD JSON from `data/` and writes marked copies to `dataMarked/`; it must not modify original playlist data. It adds integer fields `matched_song_count` and `matched_coverage_percent` to each playlist object. Use `--dry-run --max-files 1` before a full write if testing.
+
+To extract filtered playlist-track CSV files:
+
+```powershell
+python F:\ancserProject\ECS172Music\dataExtract.py
+```
+
+This reads `dataMarked/` by default and creates `dataFiltered/playlists_50songs_50coverage.csv`, `dataFiltered/playlists_50songs.csv`, and `dataFiltered/playlists_50coverage.csv`.
+
 For a quick no-data demo:
 
 ```powershell

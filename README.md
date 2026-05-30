@@ -681,6 +681,28 @@ For full MPD scan, use multiple workers:
 python F:\ancserProject\ECS172Music\dataScan.py --workers 8
 ```
 
+Create marked MPD JSON copies once with matched lyrics count and integer coverage percent:
+
+```bat
+python F:\ancserProject\ECS172Music\dataFilter.py --workers 4
+```
+
+This reads original MPD files from `data/` and writes marked copies to `dataMarked/`. It does not modify the original playlist files.
+
+Extract filtered playlist-track CSVs:
+
+```bat
+python F:\ancserProject\ECS172Music\dataExtract.py
+```
+
+This writes:
+
+```text
+dataFiltered/playlists_50songs_50coverage.csv
+dataFiltered/playlists_50songs.csv
+dataFiltered/playlists_50coverage.csv
+```
+
 
 
 

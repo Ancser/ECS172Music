@@ -1,4 +1,6 @@
 ﻿/data/
+/dataMarked/
+/dataFiltered/
 /models/
 __pycache__/
 *.pyc
