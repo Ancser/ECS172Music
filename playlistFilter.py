@@ -32,6 +32,7 @@ CSV_FIELDS = [
     "pos",
     "track_name",
     "artist_name",
+    "album_name",
     "song_id",
 ]
 
@@ -50,6 +51,7 @@ def matched_track_rows(playlist: dict[str, object], lyrics_keys: set[str]) -> li
             continue
         title = str(track.get("track_name") or track.get("name") or track.get("title") or "")
         artist = str(track.get("artist_name") or track.get("artist") or "")
+        album = str(track.get("album_name") or track.get("album") or "")
         key = song_key(title, artist)
         if key not in lyrics_keys:
             continue
@@ -63,6 +65,7 @@ def matched_track_rows(playlist: dict[str, object], lyrics_keys: set[str]) -> li
                 "pos": track.get("pos", idx),
                 "track_name": title,
                 "artist_name": artist,
+                "album_name": album,
                 "song_id": key,
             }
         )

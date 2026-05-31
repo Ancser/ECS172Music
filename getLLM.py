@@ -102,7 +102,7 @@ def download_and_test(model_name: str, cache_dir: Path, device: str) -> None:
         resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
     if resolved_device == "cuda" and not torch.cuda.is_available():
         print("CUDA was requested, but this Python environment has CPU-only PyTorch.")
-        print("Run: python .\\install_llm.py --cuda-torch --device cuda")
+        print("Run: python .\\getLLM.py --cuda-torch --device cuda")
         raise SystemExit(2)
     print(f"HF_HUB_CACHE: {hub_cache}")
     print(f"Model:   {model_name}")
