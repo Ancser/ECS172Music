@@ -55,6 +55,33 @@ NDCG@10   = 0.41844
 Proxy@10  = 0.41403
 ```
 
+### spotify_playlist_50item.csv
+
+```text
+Ranking result ========================================================
+Model / full description                                                                Recall@10    NDCG@10   Proxy@10
+--------------------------------------------------------------------------------------------------------------------------
+Random catalog ordering, no personalization                                               0.00053    0.00055    0.00054
+Popularity ranking from observed training playlists                                       0.02353    0.02732    0.02543
+CF + artist25% + popularity                                                               0.14721    0.15536    0.15128
+CF + artist25% + artist score + popularity                                                0.14871    0.15547    0.15209
+CF + artist50% + popularity                                                               0.14726    0.15540    0.15133
+CF + artist50% + artist score + popularity                                                0.14878    0.15554    0.15216
+CF + artist75% + popularity                                                               0.14728    0.15537    0.15133
+CF + artist75% + artist score + popularity                                                0.14863    0.15545    0.15204
+CF + artist100% + popularity                                                              0.13714    0.14650    0.14182
+CF + artist100% + artist score + popularity                                               0.13619    0.14483    0.14051
+```
+
+Current best:
+
+```text
+CF + artist50% + artist score + popularity
+Recall@10 = 0.14878
+NDCG@10   = 0.15554
+Proxy@10  = 0.15216
+```
+
 ## Direction
 
 This project is now a non-LLM playlist continuation prototype.
