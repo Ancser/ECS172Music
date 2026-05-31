@@ -30,6 +30,22 @@ python .\recommandation.py --lyrics-csv .\data\spotify_millsongdata.csv --playli
 
 ### spotify_playlist_50percent_50item.csv
 
+Stage 1 candidate recall:
+
+```text
+Stage 1 same-artist candidate recall ========================================================
+Candidate method                                 R@100 R@200 R@300 R@400 R@500
+------------------------------------------------------------------------------
+CF + artist25% + popularity                      0.743 0.809 0.846 0.876 0.893
+CF + artist50% + popularity                      0.757 0.820 0.855 0.879 0.893
+CF + artist75% + popularity                      0.761 0.821 0.854 0.875 0.888
+CF + artist100% + popularity                     0.754 0.800 0.824 0.848 0.865
+Popularity                                       0.166 0.220 0.263 0.305 0.331
+CF                                               0.678 0.739 0.777 0.804 0.819
+```
+
+Ranking result:
+
 ```text
 Ranking result ========================================================
 Model / full description                                                                Recall@10    NDCG@10   Proxy@10
