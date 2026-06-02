@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
-"""Playlist continuation prototype without LLM song semantics.
+"""Playlist continuation prototype with optional playlist-side LLM semantics.
 
 Pipeline:
 - load Spotify lyrics catalog and filtered playlist rows
 - split each playlist into observed songs and last-K heldout songs
 - Stage 1: retrieve candidates with same-artist priority plus CF/popularity
-- Stage 2: rank Stage 1 candidates with CF, artist metadata, and popularity
-
-This file intentionally does not call an LLM and does not use generated song
-semantic files. Language features are omitted because the current joined catalog
-is effectively English-only.
+- optional pre-CF playlist semantic generation from observed songs
+- Stage 2: rank Stage 1 candidates with CF, artist metadata, popularity, and
+  optional playlist semantic match
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
+import hashlib
 import json
 import math
+import os
 import random
 import re
 import time
@@ -32,10 +33,157 @@ DEFAULT_DATA_DIR = ROOT / "data"
 DEFAULT_FILTERED_DIR = ROOT / "dataFiltered"
 DEFAULT_LYRICS_CSV = DEFAULT_DATA_DIR / "spotify_millsongdata.csv"
 DEFAULT_FILTERED_PLAYLIST_CSV = DEFAULT_FILTERED_DIR / "spotify_playlist_50percent_50item.csv"
+DEFAULT_SEMANTIC_CACHE = DEFAULT_FILTERED_DIR / "playlist_semantics.jsonl"
+DEFAULT_SONG_SEMANTIC_CACHE = DEFAULT_FILTERED_DIR / "song_semantics_fine_keywords.jsonl"
+DEFAULT_LLM_CACHE_DIR = ROOT / "models" / "llm_cache"
 STAGE1_RATIOS = (0.25, 0.50, 0.75, 1.00)
 STAGE1_POOL_SIZES = (100, 200, 300, 400, 500)
 STAGE2_POOL_SIZE = max(STAGE1_POOL_SIZES)
 PROGRESS_INTERVAL = 100
+SEMANTIC_SCHEMA_VERSION = "fine_keywords_v1"
+SEMANTIC_JSON_KEYS = [
+    "top_keywords",
+    "affect",
+    "energy",
+    "valence",
+    "genre_style",
+    "narrative_theme",
+    "listening_context",
+    "cohesion",
+    "next_song_role",
+]
+SEMANTIC_ALLOWED = {
+    "top_keywords": [
+        "high_arousal",
+        "low_arousal",
+        "dancefloor",
+        "theatrical",
+        "rebellious",
+        "melancholic_story",
+        "nostalgic",
+        "cinematic",
+        "angsty",
+        "romantic_tension",
+        "party",
+        "workout",
+        "roadtrip",
+        "chill",
+        "singalong",
+        "dark",
+        "uplifting",
+        "confident",
+        "dreamy",
+        "aggressive",
+        "playful",
+        "anime",
+        "club",
+        "acoustic",
+        "heartbreak",
+        "empowerment",
+        "mixed",
+    ],
+    "affect": [
+        "confident",
+        "dramatic",
+        "melancholic",
+        "angsty",
+        "euphoric",
+        "dark",
+        "playful",
+        "dreamy",
+        "aggressive",
+        "nostalgic",
+        "romantic",
+        "chill",
+        "uplifting",
+        "mixed",
+    ],
+    "genre_style": [
+        "rock",
+        "alt_rock",
+        "classic_rock",
+        "pop",
+        "dance_pop",
+        "hiphop",
+        "rnb",
+        "country",
+        "soul",
+        "folk",
+        "metal",
+        "electronic",
+        "electropop",
+        "punk",
+        "indie",
+        "soundtrack",
+        "anime",
+        "mixed",
+    ],
+    "narrative_theme": [
+        "love",
+        "heartbreak",
+        "desire",
+        "self_expression",
+        "youth",
+        "escape",
+        "loneliness",
+        "resilience",
+        "celebration",
+        "conflict",
+        "fantasy",
+        "coming_of_age",
+        "depression",
+        "empowerment",
+        "mixed",
+    ],
+    "listening_context": [
+        "party",
+        "wedding",
+        "halloween",
+        "workout",
+        "roadtrip",
+        "chill",
+        "slow_dance",
+        "nostalgia",
+        "singalong",
+        "background",
+        "mixed",
+    ],
+    "energy": ["low", "mid", "high"],
+    "valence": ["negative", "mixed", "positive"],
+    "cohesion": ["genre", "affect", "activity", "theme", "story", "mixed"],
+    "next_song_role": ["same_vibe", "energy_lift", "cooldown", "genre_bridge", "singalong", "romantic", "spooky"],
+}
+SEMANTIC_LIST_KEYS = {"top_keywords", "affect", "genre_style", "narrative_theme"}
+SEMANTIC_FREE_TEXT_KEYS: set[str] = set()
+SEMANTIC_TERM_EXPANSIONS = {
+    "high_arousal": ["dance", "fire", "wild", "tonight", "loud", "run", "fight", "party"],
+    "low_arousal": ["slow", "soft", "quiet", "sleep", "dream", "rain", "alone"],
+    "dancefloor": ["dance", "club", "floor", "dj", "beat", "body", "tonight"],
+    "theatrical": ["drama", "fame", "show", "stage", "monster", "applause", "glory"],
+    "rebellious": ["fight", "break", "riot", "rebel", "wild", "control", "rules"],
+    "melancholic_story": ["sad", "cry", "tears", "lonely", "goodbye", "miss", "broken", "pain"],
+    "nostalgic": ["remember", "yesterday", "old", "again", "home", "memory", "time"],
+    "cinematic": ["dream", "sky", "world", "story", "night", "light", "hero"],
+    "angsty": ["pain", "hate", "alone", "broken", "scream", "dark", "inside"],
+    "romantic_tension": ["love", "heart", "kiss", "touch", "desire", "need", "want"],
+    "party": ["party", "tonight", "dance", "drink", "club", "everybody"],
+    "workout": ["run", "strong", "fight", "power", "move", "body"],
+    "roadtrip": ["road", "drive", "highway", "home", "miles", "ride"],
+    "chill": ["slow", "easy", "relax", "quiet", "soft", "dream"],
+    "singalong": ["sing", "song", "na", "la", "everybody", "chorus"],
+    "dark": ["dark", "black", "night", "shadow", "dead", "fear"],
+    "uplifting": ["hope", "rise", "light", "free", "alive", "higher"],
+    "confident": ["fame", "money", "power", "boss", "strong", "winner"],
+    "dreamy": ["dream", "sleep", "sky", "moon", "stars", "float"],
+    "aggressive": ["fight", "kill", "rage", "blood", "scream", "fire"],
+    "playful": ["fun", "play", "baby", "smile", "crazy", "sweet"],
+    "anime": ["hero", "dream", "world", "story", "fight", "future"],
+    "club": ["club", "dance", "dj", "beat", "floor", "bass"],
+    "acoustic": ["guitar", "home", "simple", "voice", "song"],
+    "heartbreak": ["heart", "broken", "goodbye", "tears", "miss", "alone"],
+    "empowerment": ["strong", "free", "power", "rise", "fight", "alive"],
+    "depression": ["sad", "alone", "dark", "cry", "pain", "empty", "broken"],
+}
 
 @dataclass(frozen=True)
 class Song:
@@ -59,6 +207,7 @@ class PreparedCase:
     cf_norm: dict[str, float]
     artist_norm: dict[str, float]
     pop_norm: dict[str, float]
+    semantic_norm: dict[str, float]
     retrieval: float
     cold_start: bool
 
@@ -344,6 +493,702 @@ def score_artist_metadata(
     return artist_scores
 
 
+def semantic_cache_key(playlist_id: str, observed: list[str]) -> str:
+    payload = json.dumps([SEMANTIC_SCHEMA_VERSION, playlist_id, observed], ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def load_semantic_cache(path: Path) -> dict[str, dict[str, object]]:
+    cache: dict[str, dict[str, object]] = {}
+    if not path.exists():
+        return cache
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            key = str(record.get("cache_key", ""))
+            semantic = record.get("semantic")
+            if key and isinstance(semantic, dict):
+                cache[key] = semantic
+    return cache
+
+
+def append_semantic_cache(path: Path, records: list[dict[str, object]]) -> None:
+    if not records:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        f.flush()
+
+
+def song_prompt_line(song_id: str, songs: dict[str, Song], lyrics_chars: int) -> str:
+    song = songs.get(song_id)
+    if not song:
+        return song_id
+    lyrics = re.sub(r"\s+", " ", song.lyrics).strip()
+    if len(lyrics) > lyrics_chars:
+        lyrics = lyrics[:lyrics_chars].rsplit(" ", 1)[0]
+    return f"- title: {song.title}; artist: {song.artist}; lyrics_excerpt: {lyrics}"
+
+
+def playlist_semantic_prompt(
+    case: EvalCase,
+    songs: dict[str, Song],
+    recent_songs: int,
+    lyrics_chars: int,
+) -> str:
+    observed = case.observed[-recent_songs:] if recent_songs > 0 else case.observed
+    song_lines = "\n".join(song_prompt_line(song_id, songs, lyrics_chars) for song_id in observed)
+    allowed_lines = "\n".join(
+        f"- {key}: {', '.join(values)}"
+        for key, values in SEMANTIC_ALLOWED.items()
+    )
+    return (
+        "Classify this playlist for music recommendation.\n"
+        "Use only the observed songs below. Do not infer from hidden future songs.\n"
+        "Return valid JSON only. No markdown. No explanation.\n"
+        "Use only labels from the allowed lists. Do not invent new labels.\n"
+        "top_keywords must be exactly 3 labels describing the playlist's musical intent, not artist identity.\n"
+        "affect, genre_style, and narrative_theme must be arrays with 1 to 3 labels.\n"
+        "All other fields must be one label string.\n\n"
+        "Every key is required. Never return empty strings or empty arrays.\n"
+        "If uncertain, use mixed. For energy use mid. For next_song_role use same_vibe.\n\n"
+        "Allowed labels:\n"
+        f"{allowed_lines}\n\n"
+        "Required JSON schema:\n"
+        '{"top_keywords":[],"affect":[],"energy":"","valence":"","genre_style":[],"narrative_theme":[],"listening_context":"","cohesion":"","next_song_role":""}\n\n'
+        f"playlist_id: {case.playlist_id}\n"
+        f"observed_song_count: {len(case.observed)}\n"
+        "observed songs, in playlist order, with short lyric excerpts:\n"
+        f"{song_lines}\n\n"
+        "JSON:"
+    )
+
+
+def extract_json_object(text: str) -> dict[str, object]:
+    text = text.strip()
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        pass
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if match:
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            parsed = {}
+        if isinstance(parsed, dict) and parsed:
+            return parsed
+
+    assignment_profile: dict[str, object] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip().strip("`").rstrip(",")
+        if not line:
+            continue
+        for key in SEMANTIC_JSON_KEYS:
+            match = re.match(rf"^{re.escape(key)}\s*[:=]\s*(.+)$", line)
+            if not match:
+                continue
+            value_text = match.group(1).strip().rstrip(",")
+            try:
+                assignment_profile[key] = ast.literal_eval(value_text)
+            except (ValueError, SyntaxError):
+                assignment_profile[key] = value_text.strip("\"'")
+            break
+    return assignment_profile
+
+
+def normalize_semantic_profile(profile: dict[str, object]) -> dict[str, object]:
+    normalized: dict[str, object] = {}
+    for key in SEMANTIC_JSON_KEYS:
+        value = profile.get(key)
+        if key in SEMANTIC_FREE_TEXT_KEYS:
+            normalized[key] = normalize_free_semantic_text(str(value)) if value is not None else ""
+        elif key in SEMANTIC_LIST_KEYS:
+            values = value if isinstance(value, list) else [value]
+            cleaned = []
+            for item in values:
+                label = normalize_semantic_label(str(item), key)
+                if label and label not in cleaned:
+                    cleaned.append(label)
+            target_len = 3 if key == "top_keywords" else None
+            if not cleaned:
+                cleaned = fallback_semantic_list(key)
+            if target_len:
+                for fallback in fallback_semantic_list(key):
+                    if len(cleaned) >= target_len:
+                        break
+                    if fallback not in cleaned:
+                        cleaned.append(fallback)
+            normalized[key] = cleaned[:3]
+        else:
+            label = normalize_semantic_label(str(value), key) if value is not None else ""
+            normalized[key] = label or fallback_semantic_label(key)
+    return normalized
+
+
+def normalize_free_semantic_text(value: str) -> str:
+    value = value.strip()
+    if not value:
+        return ""
+    value = re.sub(r"\s+", " ", value)
+    return value.strip(" \"'`")[:80]
+
+
+def fallback_semantic_label(key: str) -> str:
+    if key == "energy":
+        return "mid"
+    if key == "next_song_role":
+        return "same_vibe"
+    allowed = SEMANTIC_ALLOWED.get(key, [])
+    return "mixed" if "mixed" in allowed else (allowed[0] if allowed else "")
+
+
+def fallback_semantic_list(key: str) -> list[str]:
+    if key == "top_keywords":
+        return ["mixed", "high_arousal", "nostalgic"]
+    label = fallback_semantic_label(key)
+    return [label] if label else []
+
+
+def normalize_semantic_label(value: str, key: str) -> str:
+    label = normalize_text(value).replace(" ", "_")
+    aliases = {
+        "medium": "mid",
+        "moderate": "mid",
+        "alt": "alt_rock",
+        "alternative": "alt_rock",
+        "alternative_rock": "alt_rock",
+        "classic": "classic_rock",
+        "dance": "dance_pop",
+        "rap": "hiphop",
+        "hip_hop": "hiphop",
+        "r_b": "rnb",
+        "r_and_b": "rnb",
+        "edm": "electronic",
+        "00s": "2000s",
+        "2000": "2000s",
+        "10s": "2010s",
+        "2010": "2010s",
+        "90": "90s",
+        "90s_": "90s",
+        "1990s": "90s",
+        "80": "80s",
+        "1980s": "80s",
+        "70": "70s",
+        "1970s": "70s",
+        "60": "60s",
+        "1960s": "60s",
+        "positive_upbeat": "positive",
+        "upbeat": "happy",
+        "energetic": "high",
+        "intense": "high_arousal",
+        "hype": "high_arousal",
+        "excited": "high_arousal",
+        "exciting": "high_arousal",
+        "pump_up": "high_arousal",
+        "calm": "low_arousal",
+        "soft": "low_arousal",
+        "clubby": "dancefloor",
+        "club_music": "dancefloor",
+        "dance": "dancefloor",
+        "dance_pop": "dance_pop",
+        "dramatic": "theatrical",
+        "drama": "theatrical",
+        "melancholy": "melancholic",
+        "sad": "melancholic",
+        "sadness": "melancholic",
+        "depressed": "depression",
+        "depressive": "depression",
+        "anime_opening": "anime",
+        "anime_ost": "anime",
+        "ost": "soundtrack",
+        "film_score": "cinematic",
+        "movie": "cinematic",
+        "empowering": "empowerment",
+        "self_expression": "self_expression",
+        "heart_break": "heartbreak",
+        "heartbroken": "heartbreak",
+        "angst": "angsty",
+        "same_mood": "same_vibe",
+        "bridge": "genre_bridge",
+        "thematic": "theme",
+        "theme_based": "theme",
+        "genre_based": "genre",
+        "mood_based": "affect",
+        "activity_based": "activity",
+        "vibe": "affect",
+    }
+    label = aliases.get(label, label)
+    allowed = set(SEMANTIC_ALLOWED.get(key, []))
+    return label if label in allowed else ""
+
+
+def favorite_observed_artist(case: EvalCase, songs: dict[str, Song]) -> str:
+    counts: Counter[str] = Counter()
+    first_seen: dict[str, int] = {}
+    for idx, song_id in enumerate(case.observed):
+        song = songs.get(song_id)
+        if not song:
+            continue
+        artist = song.artist.strip()
+        if not artist:
+            continue
+        counts[artist] += 1
+        first_seen.setdefault(artist, idx)
+    if not counts:
+        return ""
+    return min(counts, key=lambda artist: (-counts[artist], first_seen[artist], artist.lower()))
+
+
+def enrich_playlist_semantic(profile: dict[str, object], case: EvalCase, songs: dict[str, Song]) -> dict[str, object]:
+    return normalize_semantic_profile(profile)
+
+
+def heuristic_playlist_semantic(case: EvalCase, songs: dict[str, Song]) -> dict[str, object]:
+    positive = {"love", "happy", "dance", "party", "smile", "hope", "free", "tonight", "dream"}
+    negative = {"sad", "cry", "miss", "lonely", "alone", "tears", "goodbye", "pain", "broken"}
+    high_energy = {"dance", "party", "club", "fire", "run", "jump", "loud", "wild", "fight"}
+    low_energy = {"sleep", "quiet", "soft", "slow", "rain", "alone", "dream", "night"}
+    stop = {
+        "the", "and", "you", "your", "that", "with", "for", "this", "from", "are", "was", "were",
+        "have", "has", "had", "not", "but", "all", "out", "get", "got", "just", "like", "will",
+    }
+    tokens: Counter[str] = Counter()
+    artists = []
+    for song_id in case.observed:
+        song = songs.get(song_id)
+        if not song:
+            continue
+        artists.append(song.artist.lower())
+        text = f"{song.title} {song.artist} {song.lyrics}"
+        for token in re.findall(r"[a-zA-Z][a-zA-Z']{2,}", text.lower()):
+            if token not in stop:
+                tokens[token] += 1
+    top_terms = [token for token, _ in tokens.most_common(8)]
+    pos_hits = sum(tokens.get(token, 0) for token in positive)
+    neg_hits = sum(tokens.get(token, 0) for token in negative)
+    high_hits = sum(tokens.get(token, 0) for token in high_energy)
+    low_hits = sum(tokens.get(token, 0) for token in low_energy)
+    artist_counts = Counter(artists)
+    max_artist_share = max(artist_counts.values()) / len(artists) if artists else 0.0
+    return enrich_playlist_semantic(
+        {
+            "top_keywords": ["dancefloor", "high_arousal", "party"] if high_hits > low_hits else ["melancholic_story", "low_arousal", "chill"] if low_hits > high_hits else ["mixed", "nostalgic", "singalong"],
+            "affect": ["euphoric"] if pos_hits > neg_hits else ["melancholic"] if neg_hits > pos_hits else ["mixed"],
+            "genre_style": ["mixed"],
+            "narrative_theme": ["celebration"] if pos_hits > neg_hits else ["heartbreak"] if neg_hits > pos_hits else ["mixed"],
+            "listening_context": "party" if any(term in tokens for term in ("party", "dance", "club")) else "mixed",
+            "energy": "high" if high_hits > low_hits else "low" if low_hits > high_hits else "mid",
+            "valence": "positive" if pos_hits > neg_hits else "negative" if neg_hits > pos_hits else "mixed",
+            "cohesion": "genre" if max_artist_share >= 0.5 else "mixed",
+            "next_song_role": "same_vibe",
+        },
+        case,
+        songs,
+    )
+
+
+def count_text_hits(text: str, words: Iterable[str]) -> int:
+    score = 0
+    for word in words:
+        normalized = normalize_text(word)
+        if normalized and re.search(rf"\b{re.escape(normalized)}\b", text):
+            score += 1
+    return score
+
+
+def top_labels_from_scores(scores: dict[str, float], allowed: list[str], limit: int, fallback: list[str]) -> list[str]:
+    ranked = [
+        (score, label)
+        for label, score in scores.items()
+        if score > 0 and label in allowed
+    ]
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    labels = [label for _, label in ranked[:limit]]
+    for label in fallback:
+        if len(labels) >= limit:
+            break
+        if label in allowed and label not in labels:
+            labels.append(label)
+    return labels[:limit]
+
+
+def heuristic_song_semantic(song: Song) -> dict[str, object]:
+    text = normalize_text(f"{song.title} {song.lyrics}")
+    keyword_scores = {
+        label: float(count_text_hits(text, terms))
+        for label, terms in SEMANTIC_TERM_EXPANSIONS.items()
+        if label in SEMANTIC_ALLOWED["top_keywords"]
+    }
+    genre_scores = {
+        "rock": count_text_hits(text, ["guitar", "rock", "band", "loud"]),
+        "dance_pop": count_text_hits(text, ["dance", "party", "club", "beat", "body"]),
+        "electropop": count_text_hits(text, ["electric", "neon", "synth", "fame", "monster"]),
+        "hiphop": count_text_hits(text, ["rap", "flow", "money", "mic", "street"]),
+        "rnb": count_text_hits(text, ["baby", "love", "touch", "slow", "body"]),
+        "country": count_text_hits(text, ["road", "truck", "home", "whiskey", "town"]),
+        "soundtrack": count_text_hits(text, ["story", "hero", "world", "dream", "sky"]),
+        "anime": count_text_hits(text, ["hero", "future", "world", "fight", "dream"]),
+        "metal": count_text_hits(text, ["blood", "rage", "scream", "dark", "fire"]),
+        "folk": count_text_hits(text, ["home", "river", "simple", "guitar", "old"]),
+    }
+    affect_scores = {
+        "confident": count_text_hits(text, ["strong", "power", "winner", "fame", "money"]),
+        "dramatic": count_text_hits(text, ["drama", "stage", "show", "applause", "glory"]),
+        "melancholic": count_text_hits(text, ["sad", "tears", "cry", "lonely", "goodbye"]),
+        "angsty": count_text_hits(text, ["pain", "hate", "broken", "scream", "inside"]),
+        "euphoric": count_text_hits(text, ["tonight", "party", "alive", "higher", "free"]),
+        "dark": count_text_hits(text, ["dark", "black", "shadow", "dead", "fear"]),
+        "playful": count_text_hits(text, ["fun", "play", "baby", "smile", "crazy"]),
+        "dreamy": count_text_hits(text, ["dream", "moon", "stars", "sleep", "sky"]),
+        "nostalgic": count_text_hits(text, ["remember", "yesterday", "again", "home", "time"]),
+        "romantic": count_text_hits(text, ["love", "heart", "kiss", "touch", "desire"]),
+        "chill": count_text_hits(text, ["slow", "easy", "quiet", "soft", "relax"]),
+        "uplifting": count_text_hits(text, ["hope", "rise", "light", "free", "alive"]),
+    }
+    theme_scores = {
+        "love": count_text_hits(text, ["love", "heart", "kiss", "baby", "desire"]),
+        "heartbreak": count_text_hits(text, ["broken", "goodbye", "tears", "miss", "alone"]),
+        "desire": count_text_hits(text, ["want", "need", "touch", "body", "desire"]),
+        "self_expression": count_text_hits(text, ["fame", "show", "applause", "born", "free"]),
+        "youth": count_text_hits(text, ["young", "school", "summer", "teen", "kid"]),
+        "escape": count_text_hits(text, ["run", "away", "escape", "leave", "road"]),
+        "loneliness": count_text_hits(text, ["alone", "lonely", "empty", "night", "miss"]),
+        "resilience": count_text_hits(text, ["rise", "strong", "fight", "survive", "alive"]),
+        "celebration": count_text_hits(text, ["party", "tonight", "dance", "drink", "everybody"]),
+        "conflict": count_text_hits(text, ["fight", "war", "hate", "break", "hurt"]),
+        "fantasy": count_text_hits(text, ["dream", "magic", "world", "monster", "fairy"]),
+        "coming_of_age": count_text_hits(text, ["young", "grow", "learn", "home", "time"]),
+        "depression": count_text_hits(text, ["sad", "alone", "dark", "pain", "empty"]),
+        "empowerment": count_text_hits(text, ["power", "strong", "free", "rise", "fight"]),
+    }
+    high_hits = count_text_hits(text, SEMANTIC_TERM_EXPANSIONS["high_arousal"])
+    low_hits = count_text_hits(text, SEMANTIC_TERM_EXPANSIONS["low_arousal"])
+    positive_hits = count_text_hits(text, ["love", "party", "hope", "free", "smile", "alive", "dance"])
+    negative_hits = count_text_hits(text, ["sad", "cry", "tears", "lonely", "pain", "broken", "dark"])
+    if high_hits > low_hits:
+        energy = "high"
+    elif low_hits > high_hits:
+        energy = "low"
+    else:
+        energy = "mid"
+    if positive_hits > negative_hits:
+        valence = "positive"
+    elif negative_hits > positive_hits:
+        valence = "negative"
+    else:
+        valence = "mixed"
+    context_scores = {
+        "party": count_text_hits(text, ["party", "club", "dance", "tonight", "drink"]),
+        "workout": count_text_hits(text, ["run", "strong", "fight", "move", "body"]),
+        "roadtrip": count_text_hits(text, ["road", "drive", "highway", "ride", "miles"]),
+        "chill": count_text_hits(text, ["slow", "easy", "quiet", "soft", "dream"]),
+        "singalong": count_text_hits(text, ["sing", "song", "everybody", "chorus"]),
+        "nostalgia": count_text_hits(text, ["remember", "old", "again", "home", "time"]),
+    }
+    listening_context = max(context_scores, key=lambda label: (context_scores[label], label))
+    if context_scores[listening_context] <= 0:
+        listening_context = "mixed"
+    return normalize_semantic_profile(
+        {
+            "top_keywords": top_labels_from_scores(keyword_scores, SEMANTIC_ALLOWED["top_keywords"], 3, ["mixed", "high_arousal", "nostalgic"]),
+            "affect": top_labels_from_scores(affect_scores, SEMANTIC_ALLOWED["affect"], 3, ["mixed"]),
+            "energy": energy,
+            "valence": valence,
+            "genre_style": top_labels_from_scores(genre_scores, SEMANTIC_ALLOWED["genre_style"], 3, ["mixed"]),
+            "narrative_theme": top_labels_from_scores(theme_scores, SEMANTIC_ALLOWED["narrative_theme"], 3, ["mixed"]),
+            "listening_context": listening_context,
+            "cohesion": "mixed",
+            "next_song_role": "same_vibe",
+        }
+    )
+
+
+def song_semantic_cache_key(song_id: str) -> str:
+    payload = json.dumps([SEMANTIC_SCHEMA_VERSION, "song", song_id], ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def build_song_semantics(
+    songs: dict[str, Song],
+    mode: str,
+    cache_path: Path,
+) -> dict[str, dict[str, object]]:
+    if mode == "off":
+        return {}
+    print_section("Preparing song semantics")
+    print(f"  mode:          {mode}")
+    print(f"  cache:         {cache_path}")
+    cache = load_semantic_cache(cache_path)
+    semantics: dict[str, dict[str, object]] = {}
+    new_records: list[dict[str, object]] = []
+    reused = 0
+    generated = 0
+    started = time.time()
+    items = sorted(songs.items())
+    for idx, (song_id, song) in enumerate(items, start=1):
+        key = song_semantic_cache_key(song_id)
+        if key in cache:
+            semantics[song_id] = normalize_semantic_profile(cache[key])
+            reused += 1
+        else:
+            profile = heuristic_song_semantic(song)
+            semantics[song_id] = profile
+            generated += 1
+            new_records.append(
+                {
+                    "cache_key": key,
+                    "song_id": song_id,
+                    "title": song.title,
+                    "artist": song.artist,
+                    "semantic": profile,
+                }
+            )
+        if len(new_records) >= 500:
+            append_semantic_cache(cache_path, new_records)
+            new_records = []
+        if idx == 1 or idx == len(items) or (PROGRESS_INTERVAL > 0 and idx % PROGRESS_INTERVAL == 0):
+            print(f"  song semantics {idx:,}/{len(items):,} | reused={reused:,} | generated={generated:,} | elapsed={time.time() - started:.1f}s", flush=True)
+    append_semantic_cache(cache_path, new_records)
+    return semantics
+
+
+def generated_text_from_pipeline_output(output: object) -> str:
+    if isinstance(output, list) and output:
+        first = output[0]
+        if isinstance(first, dict):
+            generated = first.get("generated_text", "")
+            if isinstance(generated, list) and generated:
+                last = generated[-1]
+                if isinstance(last, dict):
+                    return str(last.get("content", ""))
+            return str(generated)
+    return str(output)
+
+
+def load_text_generation_pipeline(model_name: str, device: str, model_cache_dir: Path):
+    try:
+        import torch
+        from transformers import pipeline
+    except Exception as exc:
+        raise SystemExit(
+            "LLM playlist semantics require transformers and torch. "
+            "Run getLLM.py first, or use --playlist-semantics heuristic."
+        ) from exc
+    resolved_device = device
+    if resolved_device == "auto":
+        resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
+    if resolved_device == "cuda" and not torch.cuda.is_available():
+        raise SystemExit("CUDA was requested for playlist semantics, but torch.cuda.is_available() is false.")
+    hub_cache = model_cache_dir / "hub"
+    if hub_cache.exists():
+        os.environ["HF_HUB_CACHE"] = str(hub_cache)
+    return pipeline(
+        "text-generation",
+        model_name,
+        model_kwargs={"dtype": "auto"},
+        device=0 if resolved_device == "cuda" else -1,
+    )
+
+
+def llm_playlist_semantic(
+    pipe,
+    case: EvalCase,
+    songs: dict[str, Song],
+    recent_songs: int,
+    lyrics_chars: int,
+    max_new_tokens: int,
+) -> dict[str, object]:
+    prompt = playlist_semantic_prompt(case, songs, recent_songs, lyrics_chars)
+    output = pipe(
+        [{"role": "user", "content": prompt}],
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+    )
+    parsed = extract_json_object(generated_text_from_pipeline_output(output))
+    if not parsed:
+        parsed = heuristic_playlist_semantic(case, songs)
+    return enrich_playlist_semantic(parsed, case, songs)
+
+
+def build_playlist_semantics(
+    cases: list[EvalCase],
+    songs: dict[str, Song],
+    mode: str,
+    cache_path: Path,
+    model_name: str,
+    model_cache_dir: Path,
+    device: str,
+    recent_songs: int,
+    lyrics_chars: int,
+    max_new_tokens: int,
+    max_generate: int,
+    force_regenerate: bool,
+) -> dict[str, dict[str, object]]:
+    if mode == "off":
+        return {}
+    print_section("Preparing playlist semantics")
+    print(f"  mode:          {mode}")
+    print(f"  cache:         {cache_path}")
+    cache = {} if force_regenerate else load_semantic_cache(cache_path)
+    pipe = None
+    semantics: dict[str, dict[str, object]] = {}
+    generated = 0
+    reused = 0
+    started = time.time()
+    for idx, case in enumerate(cases, start=1):
+        key = semantic_cache_key(case.playlist_id, case.observed)
+        if key in cache:
+            semantics[case.playlist_id] = enrich_playlist_semantic(cache[key], case, songs)
+            reused += 1
+        elif max_generate and generated >= max_generate:
+            semantics[case.playlist_id] = heuristic_playlist_semantic(case, songs)
+        else:
+            if mode == "llm":
+                if pipe is None:
+                    pipe = load_text_generation_pipeline(model_name, device, model_cache_dir)
+                profile = llm_playlist_semantic(pipe, case, songs, recent_songs, lyrics_chars, max_new_tokens)
+            else:
+                profile = heuristic_playlist_semantic(case, songs)
+            semantics[case.playlist_id] = profile
+            generated += 1
+            append_semantic_cache(
+                cache_path,
+                [
+                    {
+                    "cache_key": key,
+                    "playlist_id": case.playlist_id,
+                    "observed_count": len(case.observed),
+                    "semantic": profile,
+                    }
+                ],
+            )
+        if idx == 1 or idx == len(cases) or (PROGRESS_INTERVAL > 0 and idx % PROGRESS_INTERVAL == 0):
+            print(f"  semantics {idx:,}/{len(cases):,} | reused={reused:,} | generated={generated:,} | elapsed={time.time() - started:.1f}s", flush=True)
+    return semantics
+
+
+def semantic_terms(profile: dict[str, object]) -> set[str]:
+    terms: set[str] = set()
+    for value in profile.values():
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            text = str(item).lower()
+            for phrase in re.split(r"[,;/|]+", text):
+                raw_label = normalize_text(phrase).replace(" ", "_")
+                for expansion in SEMANTIC_TERM_EXPANSIONS.get(raw_label, []):
+                    terms.add(expansion)
+                phrase = re.sub(r"[^a-z0-9 ]+", " ", phrase)
+                phrase = re.sub(r"\s+", " ", phrase).strip()
+                if len(phrase) >= 3:
+                    terms.add(phrase)
+                for token in phrase.split():
+                    if len(token) >= 4:
+                        terms.add(token)
+    return terms
+
+
+def score_playlist_semantics(
+    playlist_profile: dict[str, object] | None,
+    candidates: set[str],
+    songs: dict[str, Song],
+    song_semantics: dict[str, dict[str, object]] | None = None,
+) -> dict[str, float]:
+    if not playlist_profile:
+        return {song_id: 0.0 for song_id in candidates}
+    if song_semantics:
+        return {
+            song_id: semantic_profile_similarity(playlist_profile, song_semantics.get(song_id))
+            for song_id in candidates
+        }
+    terms = semantic_terms(playlist_profile)
+    if not terms:
+        return {song_id: 0.0 for song_id in candidates}
+    scores: dict[str, float] = {}
+    for song_id in candidates:
+        song = songs.get(song_id)
+        if not song:
+            scores[song_id] = 0.0
+            continue
+        text = normalize_text(f"{song.title} {song.artist} {song.lyrics}")
+        score = 0.0
+        for term in terms:
+            normalized = normalize_text(term)
+            if not normalized:
+                continue
+            if " " in normalized:
+                if normalized in text:
+                    score += 2.0
+            elif re.search(rf"\b{re.escape(normalized)}\b", text):
+                score += 1.0
+        scores[song_id] = score
+    return scores
+
+
+def semantic_profile_values(profile: dict[str, object] | None, key: str) -> set[str]:
+    if not profile:
+        return set()
+    value = profile.get(key)
+    values = value if isinstance(value, list) else [value]
+    return {str(item) for item in values if str(item)}
+
+
+def semantic_profile_similarity(playlist_profile: dict[str, object], song_profile: dict[str, object] | None) -> float:
+    if not song_profile:
+        return 0.0
+    score = 0.0
+    weighted_overlap = {
+        "top_keywords": 4.0,
+        "affect": 2.0,
+        "genre_style": 2.0,
+        "narrative_theme": 2.0,
+    }
+    for key, weight in weighted_overlap.items():
+        overlap = semantic_profile_values(playlist_profile, key) & semantic_profile_values(song_profile, key)
+        score += weight * len(overlap)
+
+    exact_weights = {
+        "energy": 1.0,
+        "valence": 0.75,
+        "listening_context": 1.0,
+    }
+    for key, weight in exact_weights.items():
+        playlist_values = semantic_profile_values(playlist_profile, key)
+        song_values = semantic_profile_values(song_profile, key)
+        if playlist_values and song_values and playlist_values != {"mixed"} and playlist_values & song_values:
+            score += weight
+
+    playlist_terms = semantic_profile_values(playlist_profile, "top_keywords")
+    song_affect = semantic_profile_values(song_profile, "affect")
+    song_theme = semantic_profile_values(song_profile, "narrative_theme")
+    cross_map = {
+        "romantic_tension": {"romantic", "love", "desire"},
+        "heartbreak": {"heartbreak", "melancholic", "loneliness", "depression"},
+        "melancholic_story": {"melancholic", "heartbreak", "loneliness", "depression"},
+        "theatrical": {"dramatic", "self_expression"},
+        "confident": {"confident", "empowerment"},
+        "dancefloor": {"euphoric", "celebration"},
+        "party": {"euphoric", "celebration"},
+        "dark": {"dark", "conflict", "depression"},
+        "angsty": {"angsty", "conflict"},
+        "uplifting": {"uplifting", "resilience", "empowerment"},
+    }
+    song_cross_values = song_affect | song_theme
+    for term in playlist_terms:
+        if cross_map.get(term, set()) & song_cross_values:
+            score += 1.0
+    return score
+
+
 def recall_at_k(ranked: list[str], truth: set[str], k: int) -> float:
     if not truth:
         return 0.0
@@ -396,6 +1241,7 @@ def print_metadata_tables() -> None:
         "pos",
         "track_name",
         "artist_name",
+        "playlist_semantic_profile",
     ]
     print_columns(playlist_fields, width=28, columns=3)
 
@@ -468,6 +1314,8 @@ def prepare_cases(
     songs: dict[str, Song],
     cf_neighbors: dict[str, list[tuple[str, float]]],
     popularity: Counter[str],
+    playlist_semantics: dict[str, dict[str, object]],
+    song_semantics: dict[str, dict[str, object]],
     pool_size: int,
     force_ratio: float,
     recent_window: int,
@@ -494,6 +1342,7 @@ def prepare_cases(
             cold += 1
         artist_scores = score_artist_metadata(case.observed, candidates, songs)
         pop_scores = {song_id: float(popularity.get(song_id, 0)) for song_id in candidates}
+        semantic_scores = score_playlist_semantics(playlist_semantics.get(case.playlist_id), candidates, songs, song_semantics)
         candidate_total += len(candidates)
         prepared.append(
             PreparedCase(
@@ -503,6 +1352,7 @@ def prepare_cases(
                 cf_norm=normalize_scores(cf_scores, candidates),
                 artist_norm=normalize_scores(artist_scores, candidates),
                 pop_norm=normalize_scores(pop_scores, candidates),
+                semantic_norm=normalize_scores(semantic_scores, candidates),
                 retrieval=recall_at_k(list(candidates), set(case.heldout), len(candidates)),
                 cold_start=is_cold,
             )
@@ -522,6 +1372,7 @@ def build_rankings(
     cf_weight: float,
     artist_weight: float,
     pop_weight: float,
+    semantic_weight: float = 0.0,
 ) -> list[list[str]]:
     rankings: list[list[str]] = []
     for case in prepared_cases:
@@ -531,6 +1382,7 @@ def build_rankings(
                 cf_weight * case.cf_norm.get(song_id, 0.0)
                 + artist_weight * case.artist_norm.get(song_id, 0.0)
                 + pop_weight * case.pop_norm.get(song_id, 0.0)
+                + semantic_weight * case.semantic_norm.get(song_id, 0.0)
             )
             scored.append((score, song_id))
         scored.sort(key=lambda item: (-item[0], item[1]))
@@ -606,6 +1458,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cf-weight", type=float, default=0.35)
     parser.add_argument("--artist-weight", type=float, default=0.10)
     parser.add_argument("--pop-weight", type=float, default=0.10)
+    parser.add_argument("--semantic-weight", type=float, default=0.01)
+    parser.add_argument("--playlist-semantics", choices=["off", "heuristic", "llm"], default="off")
+    parser.add_argument("--semantic-cache", type=Path, default=DEFAULT_SEMANTIC_CACHE)
+    parser.add_argument("--song-semantics", choices=["off", "heuristic"], default="heuristic")
+    parser.add_argument("--song-semantic-cache", type=Path, default=DEFAULT_SONG_SEMANTIC_CACHE)
+    parser.add_argument("--semantic-model", default="Qwen/Qwen2.5-1.5B-Instruct")
+    parser.add_argument("--semantic-model-cache-dir", type=Path, default=DEFAULT_LLM_CACHE_DIR)
+    parser.add_argument("--semantic-device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument("--semantic-recent-songs", type=int, default=20)
+    parser.add_argument("--semantic-lyrics-chars", type=int, default=240)
+    parser.add_argument("--semantic-max-new-tokens", type=int, default=256)
+    parser.add_argument("--semantic-max-generate", type=int, default=0, help="0 means generate/cache semantics for all eval playlists")
+    parser.add_argument("--force-semantic-regenerate", action="store_true")
     parser.add_argument("--no-ablations", action="store_true")
     parser.add_argument("--show-example", action="store_true", help="Print one playlist example after metric tables")
     parser.add_argument("--seed", type=int, default=172)
@@ -668,6 +1533,28 @@ def main() -> None:
     print(f"  heldout per list:   {args.holdout_k}")
     print(f"  candidate pools:    {', '.join(str(pool) for pool in STAGE1_POOL_SIZES)}")
     print(f"  ranking pool:       {STAGE2_POOL_SIZE}")
+    print(f"  semantics:          {args.playlist_semantics}")
+    print(f"  song semantics:     {args.song_semantics if args.playlist_semantics != 'off' else 'off'}")
+
+    playlist_semantics = build_playlist_semantics(
+        cases=cases,
+        songs=songs,
+        mode=args.playlist_semantics,
+        cache_path=args.semantic_cache,
+        model_name=args.semantic_model,
+        model_cache_dir=args.semantic_model_cache_dir,
+        device=args.semantic_device,
+        recent_songs=args.semantic_recent_songs,
+        lyrics_chars=args.semantic_lyrics_chars,
+        max_new_tokens=args.semantic_max_new_tokens,
+        max_generate=args.semantic_max_generate,
+        force_regenerate=args.force_semantic_regenerate,
+    )
+    song_semantics = build_song_semantics(
+        songs=songs,
+        mode=args.song_semantics if playlist_semantics else "off",
+        cache_path=args.song_semantic_cache,
+    )
 
     print_section("Building co-occurrence CF neighbors")
     cf_neighbors = build_cf_neighbors(cases, args.cf_neighbors)
@@ -710,6 +1597,8 @@ def main() -> None:
             songs=songs,
             cf_neighbors=cf_neighbors,
             popularity=popularity,
+            playlist_semantics=playlist_semantics,
+            song_semantics=song_semantics,
             pool_size=STAGE2_POOL_SIZE,
             force_ratio=ratio,
             recent_window=args.stage1_recent_window,
@@ -719,6 +1608,12 @@ def main() -> None:
         quota = int(ratio * 100)
         cf_pop = build_rankings(prepared_cases, args.cf_weight, 0.0, args.pop_weight)
         rows.append((f"CF + artist{quota}% + popularity", *evaluate_rankings(cf_pop, cases, args.top_k)))
+        if playlist_semantics and ratio == STAGE1_RATIOS[0]:
+            semantic_only = build_rankings(prepared_cases, 0.0, 0.0, 0.0, 1.0)
+            semantic_pop = build_rankings(prepared_cases, 0.0, 0.0, args.pop_weight, 1.0)
+            semantic_label = "Playlist-song semantic" if song_semantics else "Playlist semantic"
+            rows.append((f"{semantic_label} only (artist{quota}% candidate pool)", *evaluate_rankings(semantic_only, cases, args.top_k)))
+            rows.append((f"{semantic_label} + popularity (artist{quota}% candidate pool)", *evaluate_rankings(semantic_pop, cases, args.top_k)))
 
         full_rankings = build_rankings(
             prepared_cases,
@@ -728,10 +1623,28 @@ def main() -> None:
         )
         full_metrics = evaluate_rankings(full_rankings, cases, args.top_k)
         rows.append((f"CF + artist{quota}% + artist score + popularity", *full_metrics))
+        if playlist_semantics:
+            semantic_rankings = build_rankings(
+                prepared_cases,
+                args.cf_weight,
+                args.artist_weight,
+                args.pop_weight,
+                args.semantic_weight,
+            )
+            semantic_metrics = evaluate_rankings(semantic_rankings, cases, args.top_k)
+            semantic_suffix = "playlist-song semantic" if song_semantics else "playlist semantic"
+            rows.append((f"CF + artist{quota}% + artist score + popularity + {semantic_suffix}", *semantic_metrics))
+        else:
+            semantic_rankings = full_rankings
+            semantic_metrics = full_metrics
         if full_metrics[2] > best_proxy:
             best_proxy = full_metrics[2]
             best_prepared_cases = prepared_cases
             best_full_rankings = full_rankings
+        if playlist_semantics and semantic_metrics[2] > best_proxy:
+            best_proxy = semantic_metrics[2]
+            best_prepared_cases = prepared_cases
+            best_full_rankings = semantic_rankings
 
     print_stage2_results(rows)
     if args.show_example:
