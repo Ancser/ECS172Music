@@ -9,7 +9,8 @@ version:
 2. KAR factual item text for each candidate song.
 3. KAR preference-reasoning text for each playlist.
 4. TF-IDF + TruncatedSVD encoder to put item/user knowledge into one vector space.
-5. Compare baseline vs LEMON-only vs LEMON+KAR.
+5. Compare CF baseline, semantic-only models, metadata-enhanced baseline, and
+   semantic fusion variants.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ import recommandation as rec
 ROOT = Path(__file__).resolve().parent
 DEFAULT_PLAYLIST_CSV = ROOT / "dataFiltered" / "playlist_50%_50c_799.csv"
 DEFAULT_SONG_SEMANTIC_CSV = ROOT / "dataFiltered" / "song_semantics_fine_keywords_800_heuristic.csv"
+DEFAULT_SONG_LLM_CACHE = ROOT / "dataFiltered" / "song_semantics_fine_keywords_qwen.jsonl"
 
 
 def profile_terms(profile: dict[str, object]) -> list[str]:
@@ -227,6 +229,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lyrics-csv", type=Path, default=rec.DEFAULT_LYRICS_CSV)
     parser.add_argument("--playlist-csv", type=Path, default=DEFAULT_PLAYLIST_CSV)
     parser.add_argument("--song-semantic-csv", type=Path, default=DEFAULT_SONG_SEMANTIC_CSV)
+    parser.add_argument("--song-semantic-source", choices=["csv", "qwen"], default="csv")
+    parser.add_argument("--song-llm-cache", type=Path, default=DEFAULT_SONG_LLM_CACHE)
+    parser.add_argument("--song-llm-max-generate", type=int, default=0, help="0 means generate every missing eval song")
+    parser.add_argument("--song-llm-lyrics-chars", type=int, default=220)
+    parser.add_argument("--song-llm-max-new-tokens", type=int, default=130)
+    parser.add_argument("--song-llm-batch-size", type=int, default=1)
+    parser.add_argument("--semantic-model", default="Qwen/Qwen2.5-1.5B-Instruct")
+    parser.add_argument("--semantic-model-cache-dir", type=Path, default=rec.DEFAULT_LLM_CACHE_DIR)
+    parser.add_argument("--semantic-device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--max-playlists", type=int, default=50, help="0 means no cap")
     parser.add_argument("--max-eval-cases", type=int, default=50, help="0 means no cap")
     parser.add_argument("--min-playlist-len", type=int, default=20)
@@ -258,6 +269,11 @@ def main() -> None:
     print(f"  lyrics_csv:        {args.lyrics_csv}")
     print(f"  playlist_csv:      {args.playlist_csv}")
     print(f"  song_semantic_csv: {args.song_semantic_csv}")
+    print(f"  song_source:       {args.song_semantic_source}")
+    if args.song_semantic_source == "qwen":
+        print(f"  song_llm_cache:    {args.song_llm_cache}")
+        print(f"  song_llm_limit:    {args.song_llm_max_generate}")
+        print(f"  song_llm_batch:    {args.song_llm_batch_size}")
     print(f"  max_playlists:     {args.max_playlists}")
     print(f"  max_eval_cases:    {args.max_eval_cases}")
 
@@ -275,7 +291,20 @@ def main() -> None:
     popularity = rec.popularity_counts(cases)
 
     rec.print_section("Semantic feature preparation")
-    song_profiles = lemon.build_song_profiles(songs, args.song_semantic_csv)
+    if args.song_semantic_source == "qwen":
+        song_profiles = lemon.build_qwen_song_profiles(
+            songs=songs,
+            cache_path=args.song_llm_cache,
+            model_name=args.semantic_model,
+            model_cache_dir=args.semantic_model_cache_dir,
+            device=args.semantic_device,
+            lyrics_chars=args.song_llm_lyrics_chars,
+            max_new_tokens=args.song_llm_max_new_tokens,
+            max_generate=args.song_llm_max_generate,
+            batch_size=args.song_llm_batch_size,
+        )
+    else:
+        song_profiles = lemon.build_song_profiles(songs, args.song_semantic_csv)
     lemon_song_vectors = {song_id: lemon.profile_to_vector(profile) for song_id, profile in song_profiles.items()}
     lemon_user_vectors, alphas = lemon.build_user_vectors(cases, lemon_song_vectors, args.lemon_recent_window)
     print(f"  LEMON vectors:      {sum(1 for v in lemon_song_vectors.values() if v):,}/{len(lemon_song_vectors):,}")
@@ -327,11 +356,36 @@ def main() -> None:
     rows.append(("Random catalog ordering, no personalization", *rec.evaluate_rankings(random_rankings(cases, catalog, args.seed), cases, args.top_k)))
     rows.append(("Popularity ranking from observed training playlists", *rec.evaluate_rankings(popularity_rankings(cases, popularity), cases, args.top_k)))
 
-    baseline = rec.build_rankings(prepared_cases, args.cf_weight, args.artist_weight, args.pop_weight)
+    baseline_cf = rec.build_rankings(prepared_cases, args.cf_weight, 0.0, 0.0)
+    enhanced_baseline = rec.build_rankings(prepared_cases, args.cf_weight, args.artist_weight, args.pop_weight)
     lemon_only = rank_with_features(prepared_cases, lemon_user_vectors, lemon_song_vectors, kar_user_vectors, kar_item_vectors, 0.0, 0.0, 0.0, 1.0, 0.0)
     kar_only = rank_with_features(prepared_cases, lemon_user_vectors, lemon_song_vectors, kar_user_vectors, kar_item_vectors, 0.0, 0.0, 0.0, 0.0, 1.0)
     lemon_kar = rank_with_features(prepared_cases, lemon_user_vectors, lemon_song_vectors, kar_user_vectors, kar_item_vectors, 0.0, 0.0, 0.0, 1.0, 1.0)
-    baseline_lemon = rank_with_features(
+    baseline_cf_kar = rank_with_features(
+        prepared_cases,
+        lemon_user_vectors,
+        lemon_song_vectors,
+        kar_user_vectors,
+        kar_item_vectors,
+        args.cf_weight,
+        0.0,
+        0.0,
+        0.0,
+        args.kar_weight,
+    )
+    baseline_cf_lemon_kar = rank_with_features(
+        prepared_cases,
+        lemon_user_vectors,
+        lemon_song_vectors,
+        kar_user_vectors,
+        kar_item_vectors,
+        args.cf_weight,
+        0.0,
+        0.0,
+        args.lemon_weight,
+        args.kar_weight,
+    )
+    enhanced_lemon = rank_with_features(
         prepared_cases,
         lemon_user_vectors,
         lemon_song_vectors,
@@ -343,7 +397,7 @@ def main() -> None:
         args.lemon_weight,
         0.0,
     )
-    baseline_kar = rank_with_features(
+    enhanced_kar = rank_with_features(
         prepared_cases,
         lemon_user_vectors,
         lemon_song_vectors,
@@ -355,7 +409,7 @@ def main() -> None:
         0.0,
         args.kar_weight,
     )
-    baseline_lemon_kar = rank_with_features(
+    enhanced_lemon_kar = rank_with_features(
         prepared_cases,
         lemon_user_vectors,
         lemon_song_vectors,
@@ -368,13 +422,16 @@ def main() -> None:
         args.kar_weight,
     )
 
-    rows.append(("Baseline CF + artist score + popularity", *rec.evaluate_rankings(baseline, cases, args.top_k)))
+    rows.append(("Baseline CF only", *rec.evaluate_rankings(baseline_cf, cases, args.top_k)))
     rows.append(("LEMON only", *rec.evaluate_rankings(lemon_only, cases, args.top_k)))
     rows.append(("KAR only", *rec.evaluate_rankings(kar_only, cases, args.top_k)))
     rows.append(("LEMON + KAR only", *rec.evaluate_rankings(lemon_kar, cases, args.top_k)))
-    rows.append(("Baseline + LEMON", *rec.evaluate_rankings(baseline_lemon, cases, args.top_k)))
-    rows.append(("Baseline + KAR", *rec.evaluate_rankings(baseline_kar, cases, args.top_k)))
-    rows.append(("Baseline + LEMON + KAR", *rec.evaluate_rankings(baseline_lemon_kar, cases, args.top_k)))
+    rows.append(("Baseline CF + KAR", *rec.evaluate_rankings(baseline_cf_kar, cases, args.top_k)))
+    rows.append(("Baseline CF + LEMON + KAR", *rec.evaluate_rankings(baseline_cf_lemon_kar, cases, args.top_k)))
+    rows.append(("Enhanced baseline (CF + artist score + popularity)", *rec.evaluate_rankings(enhanced_baseline, cases, args.top_k)))
+    rows.append(("Enhanced baseline + LEMON", *rec.evaluate_rankings(enhanced_lemon, cases, args.top_k)))
+    rows.append(("Enhanced baseline + KAR", *rec.evaluate_rankings(enhanced_kar, cases, args.top_k)))
+    rows.append(("Enhanced baseline + LEMON + KAR", *rec.evaluate_rankings(enhanced_lemon_kar, cases, args.top_k)))
 
     rec.print_stage2_results(rows)
     print(f"\nElapsed: {time.time() - started:.1f}s")

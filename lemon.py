@@ -124,6 +124,40 @@ def llm_song_semantic(pipe, song: rec.Song, lyrics_chars: int, max_new_tokens: i
     return rec.normalize_semantic_profile(parsed)
 
 
+def llm_song_semantic_batch(
+    pipe,
+    batch: list[tuple[str, rec.Song]],
+    lyrics_chars: int,
+    max_new_tokens: int,
+    batch_size: int,
+) -> list[tuple[str, dict[str, object]]]:
+    prompts = [
+        [{"role": "user", "content": song_semantic_prompt(song, lyrics_chars)}]
+        for _, song in batch
+    ]
+    try:
+        outputs = pipe(
+            prompts,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            batch_size=max(1, batch_size),
+        )
+    except Exception as exc:
+        print(f"  batch generation failed, falling back to single-song generation: {exc}", flush=True)
+        return [
+            (song_id, llm_song_semantic(pipe, song, lyrics_chars, max_new_tokens))
+            for song_id, song in batch
+        ]
+
+    results: list[tuple[str, dict[str, object]]] = []
+    for (song_id, song), output in zip(batch, outputs):
+        parsed = rec.extract_json_object(rec.generated_text_from_pipeline_output(output))
+        if not parsed:
+            parsed = rec.heuristic_song_semantic(song)
+        results.append((song_id, rec.normalize_semantic_profile(parsed)))
+    return results
+
+
 def build_qwen_song_profiles(
     songs: dict[str, rec.Song],
     cache_path: Path,
@@ -133,6 +167,7 @@ def build_qwen_song_profiles(
     lyrics_chars: int,
     max_new_tokens: int,
     max_generate: int,
+    batch_size: int = 1,
 ) -> dict[str, dict[str, object]]:
     cache = rec.load_semantic_cache(cache_path)
     profiles: dict[str, dict[str, object]] = {}
@@ -144,7 +179,35 @@ def build_qwen_song_profiles(
     no_data = 0
     started = time.time()
 
-    for idx, (song_id, song) in enumerate(sorted(songs.items()), start=1):
+    pending: list[tuple[int, str, rec.Song]] = []
+    items = sorted(songs.items())
+
+    def flush_pending() -> None:
+        nonlocal generated, pipe, new_records
+        if not pending:
+            return
+        if pipe is None:
+            pipe = rec.load_text_generation_pipeline(model_name, device, model_cache_dir)
+        batch = [(song_id, song) for _, song_id, song in pending]
+        for song_id, profile in llm_song_semantic_batch(pipe, batch, lyrics_chars, max_new_tokens, batch_size):
+            song = songs[song_id]
+            profiles[song_id] = profile
+            generated += 1
+            new_records.append(
+                {
+                    "cache_key": rec.song_semantic_cache_key(song_id),
+                    "song_id": song_id,
+                    "title": song.title,
+                    "artist": song.artist,
+                    "semantic": profile,
+                }
+            )
+        pending.clear()
+        if len(new_records) >= 50:
+            rec.append_semantic_cache(cache_path, new_records)
+            new_records = []
+
+    for idx, (song_id, song) in enumerate(items, start=1):
         key = rec.song_semantic_cache_key(song_id)
         if key in cache:
             profiles[song_id] = rec.normalize_semantic_profile(cache[key])
@@ -157,25 +220,12 @@ def build_qwen_song_profiles(
             no_data += 1
             fallback += 1
         else:
-            if pipe is None:
-                pipe = rec.load_text_generation_pipeline(model_name, device, model_cache_dir)
-            profile = llm_song_semantic(pipe, song, lyrics_chars, max_new_tokens)
-            profiles[song_id] = profile
-            generated += 1
-            new_records.append(
-                {
-                    "cache_key": key,
-                    "song_id": song_id,
-                    "title": song.title,
-                    "artist": song.artist,
-                    "semantic": profile,
-                }
-            )
-            if len(new_records) >= 50:
-                rec.append_semantic_cache(cache_path, new_records)
-                new_records = []
+            pending.append((idx, song_id, song))
+            if len(pending) >= max(1, batch_size):
+                flush_pending()
 
         if idx == 1 or idx == len(songs) or idx % rec.PROGRESS_INTERVAL == 0:
+            flush_pending()
             print(
                 f"  qwen song semantics {idx:,}/{len(songs):,} | "
                 f"reused={reused:,} generated={generated:,} fallback={fallback:,} "
@@ -183,6 +233,7 @@ def build_qwen_song_profiles(
                 flush=True,
             )
 
+    flush_pending()
     rec.append_semantic_cache(cache_path, new_records)
     return profiles
 
@@ -393,6 +444,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--song-llm-max-generate", type=int, default=0, help="0 means generate every missing eval song")
     parser.add_argument("--song-llm-lyrics-chars", type=int, default=220)
     parser.add_argument("--song-llm-max-new-tokens", type=int, default=130)
+    parser.add_argument("--song-llm-batch-size", type=int, default=1)
     parser.add_argument("--semantic-model", default="Qwen/Qwen2.5-1.5B-Instruct")
     parser.add_argument("--semantic-model-cache-dir", type=Path, default=rec.DEFAULT_LLM_CACHE_DIR)
     parser.add_argument("--semantic-device", choices=["auto", "cpu", "cuda"], default="auto")
@@ -456,6 +508,7 @@ def main() -> None:
             lyrics_chars=args.song_llm_lyrics_chars,
             max_new_tokens=args.song_llm_max_new_tokens,
             max_generate=args.song_llm_max_generate,
+            batch_size=args.song_llm_batch_size,
         )
     else:
         song_profiles = build_song_profiles(songs, args.song_semantic_csv)

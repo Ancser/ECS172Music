@@ -32,7 +32,7 @@ python .\recommandation.py --lyrics-csv .\data\spotify_millsongdata.csv --playli
 
 | Experiment | Data | Purpose | Semantic source | Notes |
 |---|---|---|---|---|
-| Full non-semantic baseline | `spotify_playlist_50percent_50item.csv`, full run | Main CF + metadata benchmark | None | Best historical result on strict 50+ songs and 50%+ lyrics coverage. |
+| Full non-semantic enhanced baseline | `spotify_playlist_50percent_50item.csv`, full run | Main CF + metadata benchmark | None | Best historical result on strict 50+ songs and 50%+ lyrics coverage. In this README, "baseline" means CF only; artist score and popularity are metadata enhancement. |
 | Full non-semantic broader data | `spotify_playlist_50item.csv`, full run | Check performance when only playlist length is constrained | None | Lower quality because many playlists have weaker lyric coverage. |
 | Fine playlist semantic, 179 playlists | `spotify_playlist_50percent_50item.csv`, first 180 loaded, 179 eval | Test fine controlled playlist semantic schema | Qwen playlist profiles only | Diagnostic run; playlist semantic alone was weak. |
 | Playlist-song semantic, 179 playlists | Same 179 eval playlists | Compare playlist tags to song-side tags | Qwen playlist profiles + heuristic song profiles | Small improvement at `semantic_weight=0.01`, but not the final long-run result. |
@@ -42,6 +42,8 @@ python .\recommandation.py --lyrics-csv .\data\spotify_millsongdata.csv --playli
 | Semantic as Stage 1 retrieval | Same 799 eval playlists | Test whether semantic can replace CF candidate retrieval | Qwen playlist profiles + heuristic song profiles | Result: semantic should not replace CF in Stage 1. |
 | Artist-diverse playlist split | `spotify_playlist_50percent_50item.csv`, all playlists | Separate playlists whose top artist share is low | None | Fast CSV split; no LLM, no CF, no GPU needed. |
 | LEMON smoke prototype | `playlist_50%_50c_799.csv`, first 50 eval playlists | Test a LEMON-like emotion-vector architecture | Heuristic song emotion vectors | Standalone `lemon.py`; not the full trained LEMON model. |
+| LEMON+KAR full Qwen song run | `playlist_50%_50c_799.csv`, 799 eval playlists | Compare CF baseline, KAR-only, CF+KAR, and metadata-enhanced variants | 8,756 Qwen song profiles | Full overnight run; Qwen generation took about 11.27 hours; cached rerun took about 71 seconds. |
+| LEMON+KAR neural adapter | `playlist_50%_50c_799.csv`, 799 eval playlists | Train learned recommender alignment on 80% playlists and test on train/test/all splits | 8,756 cached Qwen song profiles | Pairwise neural reranker over CF, metadata, LEMON, KAR, and KAR-vector interaction features. |
 
 The 799 eval playlist ids are saved in:
 
@@ -84,8 +86,9 @@ recommendations.
 |---|---|---:|---:|---:|
 | 50/50 CSV, 799 eval playlists | Random catalog ordering | 0.00113 | 0.00116 | 0.00114 |
 | 50/50 CSV, 799 eval playlists | Popularity ranking | 0.01827 | 0.01802 | 0.01815 |
+| 50/50 CSV, 799 eval playlists | Baseline CF only | 0.38160 | 0.39521 | 0.38841 |
 | 50/50 CSV, 799 eval playlists | CF + artist25% + popularity | 0.38235 | 0.39699 | 0.38967 |
-| 50/50 CSV, 799 eval playlists | CF + artist25% + artist score + popularity | 0.40150 | 0.41267 | 0.40708 |
+| 50/50 CSV, 799 eval playlists | Enhanced baseline (CF + artist25% + artist score + popularity) | 0.40150 | 0.41267 | 0.40708 |
 | 50/50 CSV, 799 eval playlists | Old direct playlist semantic only | 0.01765 | 0.01854 | 0.01809 |
 | 50/50 CSV, 799 eval playlists | Old direct playlist semantic + popularity | 0.01902 | 0.01954 | 0.01928 |
 | 50/50 CSV, 799 eval playlists | Old direct CF + artist + popularity + playlist semantic | 0.39212 | 0.40472 | 0.39842 |
@@ -118,19 +121,60 @@ recommendations.
 | LEMON+KAR smoke, 50 eval playlists, heuristic song semantic | LEMON only | 0.03800 | 0.03529 | 0.03665 |
 | LEMON+KAR smoke, 50 eval playlists, heuristic song semantic | KAR only | 0.04600 | 0.04289 | 0.04445 |
 | LEMON+KAR smoke, 50 eval playlists, heuristic song semantic | LEMON + KAR only | 0.05200 | 0.05844 | 0.05522 |
-| LEMON+KAR smoke, 50 eval playlists, heuristic song semantic | Baseline CF + artist score + popularity | 0.26400 | 0.28989 | 0.27694 |
-| LEMON+KAR smoke, 50 eval playlists, heuristic song semantic | Baseline + KAR | 0.26400 | 0.28692 | 0.27546 |
-| LEMON+KAR smoke, 50 eval playlists, heuristic song semantic | Baseline + LEMON + KAR | 0.26400 | 0.28778 | 0.27589 |
-| LEMON+KAR Qwen partial smoke, 5 eval playlists, 40 Qwen song profiles | Baseline CF + artist score + popularity | 0.28000 | 0.21240 | 0.24620 |
+| LEMON+KAR smoke, 50 eval playlists, heuristic song semantic | Enhanced baseline (CF + artist score + popularity) | 0.26400 | 0.28989 | 0.27694 |
+| LEMON+KAR smoke, 50 eval playlists, heuristic song semantic | Enhanced baseline + KAR | 0.26400 | 0.28692 | 0.27546 |
+| LEMON+KAR smoke, 50 eval playlists, heuristic song semantic | Enhanced baseline + LEMON + KAR | 0.26400 | 0.28778 | 0.27589 |
+| LEMON+KAR Qwen partial smoke, 5 eval playlists, 40 Qwen song profiles | Enhanced baseline (CF + artist score + popularity) | 0.28000 | 0.21240 | 0.24620 |
 | LEMON+KAR Qwen partial smoke, 5 eval playlists, 40 Qwen song profiles | KAR only | 0.16000 | 0.20043 | 0.18022 |
-| LEMON+KAR Qwen partial smoke, 5 eval playlists, 40 Qwen song profiles | Baseline + KAR | 0.40000 | 0.37864 | 0.38932 |
-| LEMON+KAR Qwen partial smoke, 5 eval playlists, 40 Qwen song profiles | Baseline + LEMON + KAR | 0.36000 | 0.33071 | 0.34536 |
+| LEMON+KAR Qwen partial smoke, 5 eval playlists, 40 Qwen song profiles | Enhanced baseline + KAR | 0.40000 | 0.37864 | 0.38932 |
+| LEMON+KAR Qwen partial smoke, 5 eval playlists, 40 Qwen song profiles | Enhanced baseline + LEMON + KAR | 0.36000 | 0.33071 | 0.34536 |
+| LEMON+KAR Qwen full run, 799 eval playlists, 8,756 Qwen song profiles | Random catalog ordering | 0.00113 | 0.00116 | 0.00114 |
+| LEMON+KAR Qwen full run, 799 eval playlists, 8,756 Qwen song profiles | Popularity ranking | 0.01827 | 0.01802 | 0.01815 |
+| LEMON+KAR Qwen full run, 799 eval playlists, 8,756 Qwen song profiles | Baseline CF only | 0.38160 | 0.39521 | 0.38841 |
+| LEMON+KAR Qwen full run, 799 eval playlists, 8,756 Qwen song profiles | LEMON only | 0.03379 | 0.03441 | 0.03410 |
+| LEMON+KAR Qwen full run, 799 eval playlists, 8,756 Qwen song profiles | KAR only | 0.14493 | 0.14533 | 0.14513 |
+| LEMON+KAR Qwen full run, 799 eval playlists, 8,756 Qwen song profiles | LEMON + KAR only | 0.14368 | 0.14846 | 0.14607 |
+| LEMON+KAR Qwen full run, 799 eval playlists, 8,756 Qwen song profiles | Baseline CF + KAR | 0.38335 | 0.39789 | 0.39062 |
+| LEMON+KAR Qwen full run, 799 eval playlists, 8,756 Qwen song profiles | Baseline CF + LEMON + KAR | 0.38235 | 0.39692 | 0.38963 |
+| LEMON+KAR Qwen full run, 799 eval playlists, 8,756 Qwen song profiles | Enhanced baseline (CF + artist score + popularity) | 0.40150 | 0.41267 | 0.40708 |
+| LEMON+KAR Qwen full run, 799 eval playlists, 8,756 Qwen song profiles | Enhanced baseline + LEMON | 0.39900 | 0.41214 | 0.40557 |
+| LEMON+KAR Qwen full run, 799 eval playlists, 8,756 Qwen song profiles | Enhanced baseline + KAR | 0.40050 | 0.41316 | 0.40683 |
+| LEMON+KAR Qwen full run, 799 eval playlists, 8,756 Qwen song profiles | Enhanced baseline + LEMON + KAR | 0.39900 | 0.41212 | 0.40556 |
+| LEMON+KAR neural adapter, train 80%, pairwise loss | Baseline CF only | 0.37903 | 0.39083 | 0.38493 |
+| LEMON+KAR neural adapter, train 80%, pairwise loss | Fixed CF + KAR | 0.38059 | 0.39423 | 0.38741 |
+| LEMON+KAR neural adapter, train 80%, pairwise loss | Enhanced baseline | 0.40078 | 0.41065 | 0.40571 |
+| LEMON+KAR neural adapter, train 80%, pairwise loss | Fixed enhanced baseline + KAR | 0.39906 | 0.41092 | 0.40499 |
+| LEMON+KAR neural adapter, train 80%, pairwise loss | Neural adapter | 0.40704 | 0.41644 | 0.41174 |
+| LEMON+KAR neural adapter, test 20%, pairwise loss | Baseline CF only | 0.39188 | 0.41270 | 0.40229 |
+| LEMON+KAR neural adapter, test 20%, pairwise loss | Fixed CF + KAR | 0.39438 | 0.41250 | 0.40344 |
+| LEMON+KAR neural adapter, test 20%, pairwise loss | Enhanced baseline | 0.40438 | 0.42073 | 0.41255 |
+| LEMON+KAR neural adapter, test 20%, pairwise loss | Fixed enhanced baseline + KAR | 0.40625 | 0.42207 | 0.41416 |
+| LEMON+KAR neural adapter, test 20%, pairwise loss | Neural adapter | 0.40062 | 0.40980 | 0.40521 |
+| LEMON+KAR neural adapter, all 799, pairwise loss | Baseline CF only | 0.38160 | 0.39521 | 0.38841 |
+| LEMON+KAR neural adapter, all 799, pairwise loss | Fixed CF + KAR | 0.38335 | 0.39789 | 0.39062 |
+| LEMON+KAR neural adapter, all 799, pairwise loss | Enhanced baseline | 0.40150 | 0.41267 | 0.40708 |
+| LEMON+KAR neural adapter, all 799, pairwise loss | Fixed enhanced baseline + KAR | 0.40050 | 0.41316 | 0.40683 |
+| LEMON+KAR neural adapter, all 799, pairwise loss | Neural adapter | 0.40576 | 0.41511 | 0.41043 |
+| LEMON+KAR adapter ablation, test 20%, pairwise loss | Adapter CF only | 0.39188 | 0.41270 | 0.40229 |
+| LEMON+KAR adapter ablation, test 20%, pairwise loss | Adapter CF + metadata | 0.42375 | 0.43955 | 0.43165 |
+| LEMON+KAR adapter ablation, test 20%, pairwise loss | Adapter CF + metadata + LEMON | 0.42562 | 0.44097 | 0.43330 |
+| LEMON+KAR adapter ablation, test 20%, pairwise loss | Adapter CF + metadata + KAR score | 0.41375 | 0.42786 | 0.42080 |
+| LEMON+KAR adapter ablation, test 20%, pairwise loss | Adapter CF + metadata + KAR vector | 0.40687 | 0.41645 | 0.41166 |
+| LEMON+KAR adapter ablation, test 20%, pairwise loss | Adapter semantic only LEMON + KAR | 0.21750 | 0.22509 | 0.22130 |
+| LEMON+KAR adapter ablation, test 20%, pairwise loss | Adapter CF + metadata + LEMON + KAR all | 0.40937 | 0.41470 | 0.41204 |
+| LEMON+KAR adapter ablation, all 799, pairwise loss | Adapter CF only | 0.38160 | 0.39521 | 0.38841 |
+| LEMON+KAR adapter ablation, all 799, pairwise loss | Adapter CF + metadata | 0.42128 | 0.43357 | 0.42743 |
+| LEMON+KAR adapter ablation, all 799, pairwise loss | Adapter CF + metadata + LEMON | 0.41502 | 0.42753 | 0.42128 |
+| LEMON+KAR adapter ablation, all 799, pairwise loss | Adapter CF + metadata + KAR score | 0.41064 | 0.42318 | 0.41691 |
+| LEMON+KAR adapter ablation, all 799, pairwise loss | Adapter CF + metadata + KAR vector | 0.40839 | 0.41617 | 0.41228 |
+| LEMON+KAR adapter ablation, all 799, pairwise loss | Adapter semantic only LEMON + KAR | 0.21715 | 0.22788 | 0.22252 |
+| LEMON+KAR adapter ablation, all 799, pairwise loss | Adapter CF + metadata + LEMON + KAR all | 0.40926 | 0.41747 | 0.41337 |
 | 50/50 CSV, 179 eval playlists | Fine playlist semantic only | 0.01397 | 0.01556 | 0.01476 |
 | 50/50 CSV, 179 eval playlists | Fine playlist semantic + popularity | 0.01117 | 0.01302 | 0.01209 |
-| 50/50 CSV, 179 eval playlists | CF + artist + popularity baseline | 0.29721 | 0.31077 | 0.30399 |
+| 50/50 CSV, 179 eval playlists | Enhanced baseline (CF + artist + popularity) | 0.29721 | 0.31077 | 0.30399 |
 | 50/50 CSV, 179 eval playlists | CF + artist + popularity + playlist-song semantic, weight 0.01 | 0.29888 | 0.31398 | 0.30643 |
 | 50/50 CSV, 199 eval playlists | Deprecated favorite-artist semantic + popularity | 0.31508 | 0.30880 | 0.31194 |
-| 50/50 CSV, 199 eval playlists | Deprecated CF + artist + popularity baseline | 0.29397 | 0.30322 | 0.29860 |
+| 50/50 CSV, 199 eval playlists | Deprecated enhanced baseline (CF + artist + popularity) | 0.29397 | 0.30322 | 0.29860 |
 | 50/50 CSV, full historical run | Random catalog ordering | 0.00144 | 0.00155 | 0.00149 |
 | 50/50 CSV, full historical run | Popularity ranking | 0.02240 | 0.02356 | 0.02298 |
 | 50/50 CSV, full historical run | CF + artist25% + popularity | 0.38933 | 0.40286 | 0.39609 |
@@ -164,15 +208,18 @@ The same Stage 1 candidate sources after metadata reranking:
 
 | Finding | Evidence |
 |---|---|
-| Best overall result remains the non-semantic historical 50/50 full run. | `CF + artist75% + artist score + popularity`: Recall@10 `0.40962`, NDCG@10 `0.41844`, Proxy@10 `0.41403`. |
-| In the 799-playlist long run, non-semantic metadata reranking is still best. | `CF + artist25% + artist score + popularity`: Proxy@10 `0.40708`. |
-| New playlist-song semantic reranking reduces damage compared with old direct playlist-to-lyrics semantic matching. | Old direct semantic combined Proxy@10 `0.39842`; new playlist-song combined Proxy@10 `0.40356`; non-semantic baseline `0.40708`. |
+| Best overall result remains the non-semantic historical metadata-enhanced run. | `CF + artist75% + artist score + popularity`: Recall@10 `0.40962`, NDCG@10 `0.41844`, Proxy@10 `0.41403`. |
+| In the 799-playlist long run, CF only is the baseline and metadata enhancement is still best. | Baseline CF-only Proxy@10 is `0.38841`; enhanced baseline Proxy@10 is `0.40708`. |
+| New playlist-song semantic reranking reduces damage compared with old direct playlist-to-lyrics semantic matching. | Old direct semantic combined Proxy@10 `0.39842`; new playlist-song combined Proxy@10 `0.40356`; enhanced non-semantic baseline `0.40708`. |
 | The 262 artist-diverse subset is much harder than the 799 mixed subset. | Best diverse Proxy@10 is about `0.10188` for CF + artist75% + popularity, versus `0.40708` on the 799 mixed subset. |
 | Playlist-song semantic does not improve the artist-diverse subset. | Diverse CF + artist25% + artist score + popularity Proxy@10 is `0.10062`; adding playlist-song semantic gives `0.09997`. |
 | LEMON smoke currently behaves like a noisy weak semantic feature. | On 50 eval playlists, CF + artist + popularity Proxy@10 is `0.27694`; adding LEMON at weight `0.01` gives `0.27391`. |
-| Learned SVD embeddings run, but do not solve the weak semantic input problem. | SVD explained `0.660` variance from 72 semantic features, but CF + LEMON SVD Proxy@10 is `0.27542`, still below CF baseline `0.27694`. |
-| Partial Qwen song semantics look promising but are too small for a conclusion. | On 5 playlists with only 40 Qwen-generated song profiles and 266 heuristic fallbacks, CF + LEMON improved Proxy@10 from `0.24620` to `0.33067`; sample size is too small to trust yet. |
+| Learned SVD embeddings run, but do not solve the weak semantic input problem. | SVD explained `0.660` variance from 72 semantic features, but CF + LEMON SVD Proxy@10 is `0.27542`, still below the 50-playlist enhanced baseline `0.27694`. |
+| Partial Qwen song semantics looked promising, but the full run gives a more nuanced result. | On 799 playlists, CF+KAR improves over CF-only baseline from Proxy@10 `0.38841` to `0.39062`, but enhanced baseline+KAR is `0.40683`, slightly below enhanced baseline `0.40708`. |
 | KAR encoding is stronger than LEMON-only in smoke tests. | On 50 playlists with heuristic song semantic, LEMON+KAR-only Proxy@10 is `0.05522` versus LEMON-only `0.03665`; on 5 playlists with Qwen partial song semantic, Baseline+KAR reaches `0.38932`. |
+| Full Qwen KAR is useful as a semantic signal. | On 799 playlists, KAR-only Proxy@10 is `0.14513`, much stronger than LEMON-only `0.03410`; CF+KAR improves over CF-only, but metadata-enhanced fusion still does not beat metadata-enhanced baseline. |
+| Learned neural alignment can improve the all-799 score, but test generalization is not yet stronger than the enhanced baseline. | Pairwise neural adapter reaches all-799 Proxy@10 `0.41043`, above enhanced baseline `0.40708`; on the held-out 20% playlists, adapter Proxy@10 is `0.40521`, below enhanced baseline `0.41255`. |
+| Adapter ablation shows the main learned gain is from CF+metadata, not KAR. | On the held-out 20% split, `Adapter CF + metadata` reaches Proxy@10 `0.43165`; adding LEMON gives `0.43330`, while adding KAR score gives `0.42080` and KAR vector gives `0.41166`. |
 | Semantic-only retrieval is weak. | Stage 1 Recall@500 is `0.09136` for direct playlist semantic and `0.07472` for playlist-song semantic, versus `0.80889` for original CF. |
 | Semantic should stay in Stage 2 as a low-weight reranking signal, not replace Stage 1 CF. | Semantic Stage 1 retrieval collapses both candidate recall and final top-10 quality. |
 | Deprecated favorite-artist semantic improved scores but was not a clean semantic result. | It mainly behaved like artist metadata / artist-CF, so it was removed from the active semantic schema. |
@@ -379,7 +426,7 @@ Learned embedding:
 | User preference reasoning knowledge | Text built from recent observed songs, frequent artists, long-term semantic labels, and short-term semantic labels. |
 | Knowledge encoder | TF-IDF over item/user knowledge text followed by TruncatedSVD. |
 | Knowledge adaptation | Lightweight normalized vector scoring; no trainable hybrid-expert adapter yet. |
-| Knowledge utilization | KAR score can rank alone or be fused into baseline CF + artist + popularity. |
+| Knowledge utilization | KAR score can rank alone, be fused with CF-only baseline, or be fused with metadata-enhanced baseline. |
 
 Heuristic-song 50-playlist smoke:
 
@@ -389,12 +436,12 @@ KAR dim = 32
 KAR vocabulary = 4,000
 KAR explained variance = 0.228
 
-Baseline Proxy@10              = 0.27694
+Enhanced baseline Proxy@10     = 0.27694
 LEMON only Proxy@10            = 0.03665
 KAR only Proxy@10              = 0.04445
 LEMON + KAR only Proxy@10      = 0.05522
-Baseline + KAR Proxy@10        = 0.27546
-Baseline + LEMON + KAR Proxy   = 0.27589
+Enhanced baseline + KAR Proxy  = 0.27546
+Enhanced baseline + LEMON + KAR Proxy = 0.27589
 ```
 
 Qwen partial 5-playlist smoke:
@@ -407,19 +454,112 @@ KAR dim = 16
 KAR vocabulary = 2,000
 KAR explained variance = 0.234
 
-Baseline Proxy@10              = 0.24620
+Enhanced baseline Proxy@10     = 0.24620
 KAR only Proxy@10              = 0.18022
-Baseline + KAR Proxy@10        = 0.38932
-Baseline + LEMON + KAR Proxy   = 0.34536
+Enhanced baseline + KAR Proxy  = 0.38932
+Enhanced baseline + LEMON + KAR Proxy = 0.34536
+```
+
+Qwen full 799-playlist run:
+
+```text
+song_semantic_cache = dataFiltered/song_semantics_fine_keywords_qwen.jsonl
+song_semantic_csv = dataFiltered/song_semantics_fine_keywords_qwen.csv
+Qwen song profiles loaded = 8,756
+heuristic fallback profiles = 0
+KAR dim = 32
+KAR vocabulary = 4,000
+KAR explained variance = 0.186
+elapsed = 40,582.2s
+
+Baseline CF-only Proxy@10      = 0.38841
+LEMON only Proxy@10            = 0.03410
+KAR only Proxy@10              = 0.14513
+LEMON + KAR only Proxy@10      = 0.14607
+Baseline CF + KAR Proxy@10     = 0.39062
+Baseline CF + LEMON + KAR Proxy = 0.38963
+Enhanced baseline Proxy@10     = 0.40708
+Enhanced baseline + LEMON Proxy = 0.40557
+Enhanced baseline + KAR Proxy  = 0.40683
+Enhanced baseline + LEMON + KAR Proxy = 0.40556
+```
+
+Neural adapter 80/20 split:
+
+```text
+file = lemonKARAdapter.py
+train playlists = 639
+test playlists = 160
+all playlists = 799
+loss = pairwise ranking loss
+input features = CF, artist, popularity, LEMON score, KAR score, scalar interactions, KAR user-item vector products
+input_dim = 44
+training pairs = 114,600
+epochs = 30
+elapsed = 95.8s with cached Qwen song semantics
+
+All 799:
+Baseline CF-only Proxy@10              = 0.38841
+Fixed CF + KAR Proxy@10                = 0.39062
+Enhanced baseline Proxy@10             = 0.40708
+Fixed enhanced baseline + KAR Proxy@10 = 0.40683
+Neural adapter Proxy@10                = 0.41043
+
+Held-out test 20%:
+Baseline CF-only Proxy@10              = 0.40229
+Fixed CF + KAR Proxy@10                = 0.40344
+Enhanced baseline Proxy@10             = 0.41255
+Fixed enhanced baseline + KAR Proxy@10 = 0.41416
+Neural adapter Proxy@10                = 0.40521
+```
+
+Neural adapter ablation:
+
+```text
+same split:
+train playlists = 639
+test playlists = 160
+loss = pairwise ranking loss
+epochs = 30
+elapsed = 390.5s
+
+Held-out test 20%:
+Adapter CF only                         Proxy@10 = 0.40229
+Adapter CF + metadata                   Proxy@10 = 0.43165
+Adapter CF + metadata + LEMON           Proxy@10 = 0.43330
+Adapter CF + metadata + KAR score       Proxy@10 = 0.42080
+Adapter CF + metadata + KAR vector      Proxy@10 = 0.41166
+Adapter semantic only LEMON + KAR       Proxy@10 = 0.22130
+Adapter CF + metadata + LEMON + KAR all Proxy@10 = 0.41204
+
+All 799:
+Adapter CF only                         Proxy@10 = 0.38841
+Adapter CF + metadata                   Proxy@10 = 0.42743
+Adapter CF + metadata + LEMON           Proxy@10 = 0.42128
+Adapter CF + metadata + KAR score       Proxy@10 = 0.41691
+Adapter CF + metadata + KAR vector      Proxy@10 = 0.41228
+Adapter semantic only LEMON + KAR       Proxy@10 = 0.22252
+Adapter CF + metadata + LEMON + KAR all Proxy@10 = 0.41337
 ```
 
 Interpretation:
 
 ```text
 KAR-style encoding gives a clearer signal than LEMON emotion vectors alone.
-With heuristic song semantics, it still does not beat the strong CF baseline
-after fusion. With partial Qwen song semantics, it looks much better, but the
-sample is only 5 playlists and cannot be treated as final evidence.
+With heuristic song semantics, it still does not beat the metadata-enhanced
+baseline after fusion. The partial Qwen 5-playlist smoke looked much better, but
+the full 799-playlist run shows the gain is smaller: KAR-only is a real semantic
+signal, CF+KAR beats CF-only, and enhanced baseline+KAR still lands just below
+the enhanced baseline. The learned neural adapter improves the requested all-799
+evaluation, but it does not yet beat the enhanced baseline on the clean held-out
+20% split, so it should be reported as promising but not fully generalized.
+
+The ablation changes the story: the best learned adapter is not the full
+LEMON+KAR adapter. The strongest held-out result is CF + metadata + LEMON, and
+the strongest all-799 result is CF + metadata. That means most of the neural
+adapter gain comes from learning a better nonlinear alignment of CF, artist, and
+popularity features. Current KAR features still provide semantic signal, but in
+this adapter setup they do not improve over the learned metadata adapter.
 ```
 
 ### Artist Diversity Split
@@ -846,6 +986,30 @@ Run LEMON + KAR with partial Qwen song semantics:
 F:
 cd \ancserProject\ECS172Music
 python .\lemonKAR.py --lyrics-csv .\data\spotify_millsongdata.csv --playlist-csv ".\dataFiltered\playlist_50%_50c_799.csv" --song-semantic-csv .\dataFiltered\song_semantics_fine_keywords_qwen.csv --max-playlists 5 --max-eval-cases 5 --min-playlist-len 20 --holdout-k 10 --lemon-weight 0.01 --kar-weight 0.01 --kar-dim 16 --kar-max-features 2000 --kar-lyrics-chars 260
+```
+
+Run LEMON + KAR with full Qwen song semantics on the 799-playlist set:
+
+```cmd
+F:
+cd \ancserProject\ECS172Music
+python .\lemonKAR.py --lyrics-csv .\data\spotify_millsongdata.csv --playlist-csv ".\dataFiltered\playlist_50%_50c_799.csv" --max-playlists 0 --max-eval-cases 0 --min-playlist-len 20 --holdout-k 10 --song-semantic-source qwen --song-llm-cache .\dataFiltered\song_semantics_fine_keywords_qwen.jsonl --song-llm-max-generate 0 --song-llm-lyrics-chars 220 --song-llm-max-new-tokens 130 --song-llm-batch-size 4 --semantic-model Qwen/Qwen2.5-1.5B-Instruct --semantic-model-cache-dir .\models\llm_cache --semantic-device cuda --lemon-weight 0.01 --kar-weight 0.01 --kar-dim 32 --kar-max-features 4000 --kar-lyrics-chars 260
+```
+
+Train and evaluate the LEMON + KAR neural adapter on the 799-playlist set:
+
+```cmd
+F:
+cd \ancserProject\ECS172Music
+python .\lemonKARAdapter.py --lyrics-csv .\data\spotify_millsongdata.csv --playlist-csv ".\dataFiltered\playlist_50%_50c_799.csv" --max-playlists 0 --max-eval-cases 0 --min-playlist-len 20 --holdout-k 10 --song-semantic-source qwen --song-llm-cache .\dataFiltered\song_semantics_fine_keywords_qwen.jsonl --song-llm-max-generate 0 --song-llm-lyrics-chars 220 --song-llm-max-new-tokens 130 --song-llm-batch-size 4 --semantic-model Qwen/Qwen2.5-1.5B-Instruct --semantic-model-cache-dir .\models\llm_cache --semantic-device cuda --train-ratio 0.80 --epochs 30 --loss pairwise --negatives-per-positive 20 --hidden-dim 64 --batch-size 4096 --learning-rate 0.001 --weight-decay 0.0001 --kar-dim 32 --kar-max-features 4000 --kar-lyrics-chars 260
+```
+
+Run the neural adapter ablation:
+
+```cmd
+F:
+cd \ancserProject\ECS172Music
+python .\lemonKARAdapter.py --lyrics-csv .\data\spotify_millsongdata.csv --playlist-csv ".\dataFiltered\playlist_50%_50c_799.csv" --max-playlists 0 --max-eval-cases 0 --min-playlist-len 20 --holdout-k 10 --song-semantic-source qwen --song-llm-cache .\dataFiltered\song_semantics_fine_keywords_qwen.jsonl --song-llm-max-generate 0 --song-llm-lyrics-chars 220 --song-llm-max-new-tokens 130 --song-llm-batch-size 4 --semantic-model Qwen/Qwen2.5-1.5B-Instruct --semantic-model-cache-dir .\models\llm_cache --semantic-device cuda --train-ratio 0.80 --epochs 30 --loss pairwise --negatives-per-positive 20 --hidden-dim 64 --batch-size 4096 --learning-rate 0.001 --weight-decay 0.0001 --kar-dim 32 --kar-max-features 4000 --kar-lyrics-chars 260 --ablation
 ```
 
 Optional raw MPD JSON split from `data/`:
