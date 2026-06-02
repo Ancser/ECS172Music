@@ -1,6 +1,6 @@
-﻿/data/
+/data/*
+!/data/*.csv
 /dataMarked/
-/dataFiltered/
 /models/
 __pycache__/
 *.pyc
@@ -8,3 +8,4 @@ __pycache__/
 /paper
 *.log
 /logs
+/data

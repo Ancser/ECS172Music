@@ -360,6 +360,43 @@ def split_playlists(playlists: list[tuple[str, list[str]]], min_len: int, holdou
     return cases
 
 
+def playlist_artist_stats(case: EvalCase, songs: dict[str, Song]) -> tuple[float, int]:
+    track_ids = case.observed + case.heldout
+    artists = [songs[song_id].artist for song_id in track_ids if song_id in songs]
+
+    if not artists:
+        return 0.0, 0
+
+    artist_counts = Counter(artists)
+    top_artist_count = artist_counts.most_common(1)[0][1]
+    top_artist_share = top_artist_count / len(artists)
+    unique_artist_count = len(artist_counts)
+
+    return top_artist_share, unique_artist_count
+
+
+def split_cases_by_artist_diversity(
+    cases: list[EvalCase],
+    songs: dict[str, Song],
+    artist_dominated_threshold: float = 0.50,
+    diverse_threshold: float = 0.40,
+    min_unique_artists: int = 5,
+) -> tuple[list[EvalCase], list[EvalCase]]:
+    artist_dominated = []
+    diverse = []
+
+    for case in cases:
+        top_artist_share, unique_artist_count = playlist_artist_stats(case, songs)
+
+        if top_artist_share >= artist_dominated_threshold:
+            artist_dominated.append(case)
+
+        if top_artist_share <= diverse_threshold and unique_artist_count >= min_unique_artists:
+            diverse.append(case)
+
+    return artist_dominated, diverse
+
+
 def popularity_counts(cases: list[EvalCase]) -> Counter[str]:
     counts: Counter[str] = Counter()
     for case in cases:
@@ -1517,6 +1554,15 @@ def main() -> None:
     if args.max_eval_cases and len(cases) > args.max_eval_cases:
         print(f"Capping eval playlists from {len(cases):,} to {args.max_eval_cases:,}.")
         cases = cases[: args.max_eval_cases]
+
+    artist_dominated_cases, diverse_cases = split_cases_by_artist_diversity(cases, songs)
+
+    print_section("Playlist diversity analysis")
+    print(f"  all playlists:              {len(cases):,}")
+    print(f"  artist-dominated playlists: {len(artist_dominated_cases):,}")
+    print(f"  diverse playlists:          {len(diverse_cases):,}")
+    print("  artist-dominated rule: top artist >= 50% of playlist")
+    print("  diverse rule: top artist <= 40% and at least 5 unique artists")
 
     eval_song_ids = {song_id for case in cases for song_id in case.observed + case.heldout}
     songs = {song_id: song for song_id, song in songs.items() if song_id in eval_song_ids}

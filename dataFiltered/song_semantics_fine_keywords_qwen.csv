@@ -1,0 +1,41 @@
+cache_key,song_id,title,artist,affect,cohesion,energy,genre_style,listening_context,narrative_theme,next_song_role,top_keywords,valence
+366612f94aed7c064b93b362fee0b0995b3abe4d,adele::all i ask,All I Ask,Adele,euphoric|playful,mixed,mid,pop|electropop,mixed,love,same_vibe,romantic_tension|confident|chill,positive
+b26258f4539b8d0a9a751d145c2c8f6f0fe86fd7,adele::hello,Hello,Adele,melancholic|angsty,theme,mid,pop|soul,mixed,love|heartbreak,cooldown,romantic_tension|heartbreak|mixed,negative
+1241c8b34b2692de9a98e7692d91a6c9808c85a5,adele::i miss you,I Miss You,Adele,melancholic|romantic,theme,mid,pop|soul,mixed,heartbreak,cooldown,romantic_tension|heartbreak|mixed,negative
+240b29c588fc24e00fa4b4c408d9430f43453796,adele::love in the dark,Love In The Dark,Adele,melancholic,theme,mid,pop|electronic,mixed,love|depression,cooldown,confident|dark|mixed,negative
+a164077485efd55b440a9ba2d1ea980bf01e4f18,adele::lovesong,Lovesong,Adele,melancholic|romantic,theme,mid,pop|electropop,mixed,love|heartbreak,cooldown,romantic_tension|heartbreak|mixed,negative
+dd1c6cb75d97c46214d521591bb91caee3a8a286,adele::million years ago,Million Years Ago,Adele,melancholic|uplifting,mixed,mid,pop,mixed,love|conflict,same_vibe,romantic_tension|chill|mixed,positive
+3089a0102b555dc5839e89f3991b3ec27c6719ca,adele::one and only,One And Only,Adele,melancholic|romantic,theme,mid,pop|soul,mixed,love|heartbreak,cooldown,romantic_tension|heartbreak|mixed,negative
+f62cfc89af2a35cd621833d93a7ebb0352275b3c,adele::remedy,Remedy,Adele,melancholic,theme,mid,pop|soul,mixed,love|heartbreak,cooldown,romantic_tension|heartbreak|mixed,negative
+bded57e9c2ba2ce8453a7c5c42a0086b80592436,adele::river lea,River Lea,Adele,melancholic,mixed,mid,pop,mixed,heartbreak,cooldown,heartbreak|chill|mixed,negative
+67f6803fcb1f236d7a7ded871eb5384f63877315,adele::rolling in the deep,Rolling In The Deep,Adele,confident|melancholic,mixed,mid,pop,mixed,love,same_vibe,romantic_tension|chill|mixed,negative
+eebcb49f5a381c725d4b41a8670f87dc64e2e972,adele::send my love,Send My Love (To Your New Lover),Adele,confident,mixed,mid,pop,mixed,love,same_vibe,romantic_tension|chill|acoustic,positive
+dc6904cda55b2e148cde2ad76915244b35454b2a,adele::set fire to the rain,Set Fire To The Rain,Adele,confident|melancholic,theme,mid,pop|soundtrack,mixed,love|heartbreak,cooldown,romantic_tension|cinematic|mixed,negative
+1ca393ae66d97ff1391e07c91f3e369ad18cec04,adele::someone like you,Someone Like You,Adele,melancholic|angsty,theme,mid,pop|soul,mixed,love|heartbreak,cooldown,romantic_tension|heartbreak|mixed,negative
+831c63b7c87c9022a296879338bdccc6a94e5b1b,adele::take it all,Take It All,Adele,melancholic|angsty,theme,mid,pop,mixed,heartbreak|desire,cooldown,heartbreak|mixed|high_arousal,negative
+e7ae404efabecf1c88fbc2b09762ef0e232bd1d6,adele::water under the bridge,Water Under The Bridge,Adele,melancholic|angsty,mixed,mid,pop|soul,mixed,heartbreak,cooldown,romantic_tension|heartbreak|mixed,negative
+617a71837f069850e0ed0f0f47417f02df952ad1,adele::when we were young,When We Were Young,Adele,melancholic|playful,mixed,mid,pop|electropop,mixed,love|heartbreak,cooldown,romantic_tension|chill|heartbreak,negative
+465ce9e6fbbc7007534eec8319d62cf382355ac5,alice in chains::man in the box,Man In The Box,Alice In Chains,melancholic|playful,mixed,mid,rock|folk,mixed,heartbreak,cooldown,cinematic|heartbreak|mixed,negative
+cc23f09e5d3dbbd14ef84b633c5ebdebb07e67ef,avril lavigne::anything but ordinary,Anything But Ordinary,Avril Lavigne,confident|euphoric,theme,mid,pop|electropop,mixed,love,same_vibe,high_arousal|dancefloor|romantic_tension,positive
+870bf98609a56da9acc062a8c69953a5029319cc,avril lavigne::complicated,Complicated,Avril Lavigne,uplifting|playful,mixed,mid,pop|dance_pop,mixed,love,same_vibe,chill|confident|mixed,positive
+657292516e63b2b7603befd3e11807c18115936a,avril lavigne::i m with you,I'm With You,Avril Lavigne,melancholic|angsty,mixed,mid,pop,mixed,heartbreak,cooldown,cinematic|heartbreak|mixed,negative
+65c43166816f0ab360aea6c606aa038e15ccf1cd,avril lavigne::losing grip,Losing Grip,Avril Lavigne,melancholic|confident,theme,mid,pop,mixed,heartbreak|desire,cooldown,confident|chill|mixed,negative
+2d53b6d74dfb81af21dbfd3f2f741afad299d226,avril lavigne::mobile,Mobile,Avril Lavigne,melancholic,theme,mid,pop|country,roadtrip,mixed,cooldown,roadtrip|mixed|high_arousal,negative
+c262f3a380b810544a4dc12d2c820cfe61a2cb4d,avril lavigne::my world,My World,Avril Lavigne,melancholic,theme,mid,pop|alt_rock,mixed,love|heartbreak,cooldown,nostalgic|heartbreak|mixed,negative
+369ecc5f5377e95e3d9f6635749c9a4a5baed1cf,avril lavigne::naked,Naked,Avril Lavigne,melancholic|uplifting,mixed,mid,pop,mixed,love,same_vibe,chill|romantic_tension|mixed,positive
+0b7834fd9eafcd334466f60d6eccf9b766b6ecf8,avril lavigne::nobody s fool,Nobody's Fool,Avril Lavigne,confident|euphoric,mixed,mid,pop|electropop,mixed,love,same_vibe,high_arousal|dancefloor|romantic_tension,positive
+a3a93400e59293122f239272a7649c04e787e069,avril lavigne::sk8er boi,Sk8er Boi,Avril Lavigne,melancholic,theme,mid,pop|dance_pop,party,love|conflict,cooldown,mixed|high_arousal|nostalgic,negative
+dfaac40a88a136d0ae0c5f0eba8736e75ed864a5,avril lavigne::tomorrow,Tomorrow,Avril Lavigne,melancholic|playful,mixed,mid,pop|electropop,mixed,heartbreak,cooldown,confident|heartbreak|mixed,negative
+6b3066b876910d073d1f0cb53350eda248f9c8dd,avril lavigne::too much to ask,Too Much To Ask,Avril Lavigne,melancholic|angsty,theme,mid,pop|alt_rock,mixed,love|heartbreak,cooldown,mixed|high_arousal|nostalgic,negative
+955aafabd534d7833f398a5dd9ac98540180e556,avril lavigne::unwanted,Unwanted,Avril Lavigne,melancholic|angsty,mixed,mid,pop|alt_rock,mixed,heartbreak,cooldown,romantic_tension|heartbreak|mixed,negative
+8cfbcdfd09cdce21fbe82869beed9cd7922004d1,bruno mars::grenade,Grenade,Bruno Mars,confident|playful,mixed,mid,pop|dance_pop,mixed,love,same_vibe,party|chill|mixed,positive
+989bdc2e87993610b1fdbdf05e6311195a54ceb5,bruno mars::just the way you are,Just The Way You Are,Bruno Mars,euphoric|playful,mixed,mid,pop|dance_pop,mixed,love,same_vibe,romantic_tension|confident|chill,positive
+41d6f7ec10876584e40e75485a6cdfef6f32421d,cake::the distance,The Distance,Cake,uplifting|confident,mixed,mid,pop|electropop,mixed,mixed,same_vibe,dancefloor|party|chill,positive
+ab58692c95f05f490c417628c94d5dd025041126,drake::10 bands,10 Bands,Drake,confident,mixed,mid,pop,mixed,mixed,same_vibe,high_arousal|dancefloor|party,positive
+3375be8e57b3a14787cc5b04815292534c8d4092,drake::back to back,Back To Back,Drake,confident|uplifting,mixed,mid,pop|dance_pop,mixed,mixed,same_vibe,party|chill|mixed,positive
+20803b6c419237e47083abe669123efc77175b20,drake::best i ever had,Best I Ever Had,Drake,euphoric|playful,mixed,high,pop|dance_pop,mixed,love,same_vibe,romantic_tension|confident|party,positive
+7050d9de6c87986ca31dc4afef694a49fe05e9ee,drake::find your love,Find Your Love,Drake,euphoric|playful,mixed,high,pop|dance_pop,mixed,love,same_vibe,romantic_tension|confident|party,positive
+544ee8bb84f755e587706cdcb29a5c66b2e33d46,drake::hotline bling,Hotline Bling,Drake,confident,mixed,high,pop|electronic,mixed,mixed,same_vibe,dancefloor|party|club,positive
+6e7afdb9751fc7379c64dd60114353b289bb2888,drake::madonna,Madonna,Drake,confident|uplifting,mixed,high,pop|electropop,mixed,mixed,same_vibe,party|dancefloor|mixed,positive
+f4a4c6818092813a0fc0fa5c9fba7b630af15311,drake::over,Over,Drake,confident|playful,mixed,mid,pop|dance_pop,mixed,mixed,same_vibe,party|chill|mixed,positive
+c1bd5b9d11d7957d073fa71432e847d131011bd0,drake::practice,Practice,Drake,confident|playful,theme,mid,pop|dance_pop,mixed,love|heartbreak,same_vibe,party|chill|mixed,positive
