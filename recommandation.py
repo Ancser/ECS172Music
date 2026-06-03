@@ -40,6 +40,7 @@ DEFAULT_SEMANTIC_CACHE = DEFAULT_FILTERED_DIR / "playlist_semantics.jsonl"
 DEFAULT_SONG_SEMANTIC_CACHE = DEFAULT_FILTERED_DIR / "song_semantics_fine_keywords.jsonl"
 DEFAULT_LLM_CACHE_DIR = ROOT / "models" / "llm_cache"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
+DEFAULT_GEMMA_MODEL = "gemma-4-31b-it"
 STAGE1_RATIOS = (0.25, 0.50, 0.75, 1.00)
 STAGE1_POOL_SIZES = (100, 200, 300, 400, 500)
 STAGE2_POOL_SIZE = max(STAGE1_POOL_SIZES)
@@ -1068,20 +1069,31 @@ def gemini_playlist_semantic(
             "responseSchema": semantic_response_schema(),
         },
     }
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=90) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:1200]
-        raise SystemExit(f"Gemini API request failed with HTTP {exc.code}:\n{detail}") from exc
-    except urllib.error.URLError as exc:
-        raise SystemExit(f"Gemini API request failed: {exc}") from exc
+    body = None
+    for attempt in range(1, 4):
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=90) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            if exc.code == 429 and attempt < 3:
+                match = re.search(r"[Rr]etry in ([0-9.]+)s", detail)
+                wait_seconds = float(match.group(1)) + 2.0 if match else 65.0
+                print(f"  Gemini quota pause: sleeping {wait_seconds:.1f}s before retry {attempt + 1}/3", flush=True)
+                time.sleep(wait_seconds)
+                continue
+            raise SystemExit(f"Gemini API request failed with HTTP {exc.code}:\n{detail[:1200]}") from exc
+        except urllib.error.URLError as exc:
+            raise SystemExit(f"Gemini API request failed: {exc}") from exc
+    if body is None:
+        raise SystemExit("Gemini API request failed without a response body.")
     parts = body.get("candidates", [{}])[0].get("content", {}).get("parts", [])
     text = "".join(str(part.get("text", "")) for part in parts if isinstance(part, dict))
     parsed = extract_json_object(text)
@@ -1149,6 +1161,7 @@ def build_playlist_semantics(
     lyrics_chars: int,
     max_new_tokens: int,
     max_generate: int,
+    requests_per_minute: int,
     force_regenerate: bool,
 ) -> dict[str, dict[str, object]]:
     if mode == "off":
@@ -1163,6 +1176,8 @@ def build_playlist_semantics(
     generated = 0
     reused = 0
     started = time.time()
+    last_api_request = 0.0
+    min_request_gap = 60.0 / requests_per_minute if provider == "gemini" and requests_per_minute > 0 else 0.0
     for idx, case in enumerate(cases, start=1):
         key = semantic_cache_key(case.playlist_id, case.observed)
         if key in cache:
@@ -1173,6 +1188,9 @@ def build_playlist_semantics(
         else:
             if mode == "llm":
                 if provider == "gemini":
+                    wait = min_request_gap - (time.time() - last_api_request)
+                    if wait > 0:
+                        time.sleep(wait)
                     profile = gemini_playlist_semantic(
                         case,
                         songs,
@@ -1182,6 +1200,7 @@ def build_playlist_semantics(
                         lyrics_chars,
                         max_new_tokens,
                     )
+                    last_api_request = time.time()
                 else:
                     if pipe is None:
                         pipe = load_text_generation_pipeline(model_name, device, model_cache_dir)
@@ -1389,6 +1408,152 @@ def merge_stage1_routes(
         if len(ordered) >= pool_size:
             break
     return set(ordered)
+
+
+LEMON_LIST_WEIGHTS = {
+    "top_keywords": 1.6,
+    "affect": 2.2,
+    "genre_style": 1.2,
+    "narrative_theme": 1.7,
+}
+LEMON_SCALAR_WEIGHTS = {
+    "energy": 1.0,
+    "valence": 0.8,
+    "listening_context": 0.8,
+}
+
+
+def add_vector_value(vector: dict[str, float], key: str, value: float) -> None:
+    if value:
+        vector[key] = vector.get(key, 0.0) + value
+
+
+def l2_normalize_vector(vector: dict[str, float]) -> dict[str, float]:
+    norm = math.sqrt(sum(value * value for value in vector.values()))
+    if norm <= 0:
+        return {}
+    return {key: value / norm for key, value in vector.items()}
+
+
+def semantic_profile_to_lemon_vector(profile: dict[str, object]) -> dict[str, float]:
+    vector: dict[str, float] = {}
+    for key, weight in LEMON_LIST_WEIGHTS.items():
+        for value in semantic_profile_values(profile, key):
+            if value and value != "mixed":
+                add_vector_value(vector, f"{key}:{value}", weight)
+    for key, weight in LEMON_SCALAR_WEIGHTS.items():
+        for value in semantic_profile_values(profile, key):
+            if value and value != "mixed":
+                add_vector_value(vector, f"{key}:{value}", weight)
+    return l2_normalize_vector(vector)
+
+
+def combine_lemon_vectors(parts: list[tuple[dict[str, float], float]]) -> dict[str, float]:
+    combined: dict[str, float] = {}
+    for vector, weight in parts:
+        for key, value in vector.items():
+            combined[key] = combined.get(key, 0.0) + weight * value
+    return l2_normalize_vector(combined)
+
+
+def average_lemon_vectors(song_ids: list[str], song_vectors: dict[str, dict[str, float]]) -> dict[str, float]:
+    vectors = [song_vectors[song_id] for song_id in song_ids if song_vectors.get(song_id)]
+    if not vectors:
+        return {}
+    scale = 1.0 / len(vectors)
+    return combine_lemon_vectors([(vector, scale) for vector in vectors])
+
+
+def lemon_cosine(left: dict[str, float], right: dict[str, float]) -> float:
+    if not left or not right:
+        return 0.0
+    if len(left) > len(right):
+        left, right = right, left
+    return sum(value * right.get(key, 0.0) for key, value in left.items())
+
+
+def adaptive_lemon_alpha(long_vector: dict[str, float], short_vector: dict[str, float]) -> float:
+    agreement = max(0.0, min(1.0, lemon_cosine(long_vector, short_vector)))
+    drift = 1.0 - agreement
+    return max(0.25, min(0.75, 0.35 + 0.35 * drift))
+
+
+def build_lemon_feature_vectors(
+    cases: list[EvalCase],
+    song_semantics: dict[str, dict[str, object]],
+    recent_window: int,
+) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]], list[float]]:
+    song_vectors = {
+        song_id: semantic_profile_to_lemon_vector(profile)
+        for song_id, profile in song_semantics.items()
+    }
+    user_vectors: dict[str, dict[str, float]] = {}
+    alphas: list[float] = []
+    for case in cases:
+        long_vector = average_lemon_vectors(case.observed, song_vectors)
+        short_vector = average_lemon_vectors(case.observed[-recent_window:], song_vectors)
+        alpha = adaptive_lemon_alpha(long_vector, short_vector)
+        user_vectors[case.playlist_id] = combine_lemon_vectors(
+            [
+                (long_vector, 1.0 - alpha),
+                (short_vector, alpha),
+            ]
+        )
+        alphas.append(alpha)
+    return song_vectors, user_vectors, alphas
+
+
+def lemon_scores_for_prepared_case(
+    prepared: PreparedCase,
+    lemon_user_vectors: dict[str, dict[str, float]],
+    lemon_song_vectors: dict[str, dict[str, float]],
+) -> dict[str, float]:
+    user_vector = lemon_user_vectors.get(prepared.playlist_id, {})
+    return {
+        song_id: lemon_cosine(user_vector, lemon_song_vectors.get(song_id, {}))
+        for song_id in prepared.candidates
+    }
+
+
+def build_rankings_with_lemon(
+    prepared_cases: list[PreparedCase],
+    lemon_user_vectors: dict[str, dict[str, float]],
+    lemon_song_vectors: dict[str, dict[str, float]],
+    cf_weight: float,
+    artist_weight: float,
+    pop_weight: float,
+    semantic_weight: float,
+    lemon_weight: float,
+) -> list[list[str]]:
+    rankings: list[list[str]] = []
+    for case in prepared_cases:
+        lemon_norm = normalize_scores(
+            lemon_scores_for_prepared_case(case, lemon_user_vectors, lemon_song_vectors),
+            case.candidates,
+        )
+        scored: list[tuple[float, str]] = []
+        for song_id in case.candidates:
+            score = (
+                cf_weight * case.cf_norm.get(song_id, 0.0)
+                + artist_weight * case.artist_norm.get(song_id, 0.0)
+                + pop_weight * case.pop_norm.get(song_id, 0.0)
+                + semantic_weight * case.semantic_norm.get(song_id, 0.0)
+                + lemon_weight * lemon_norm.get(song_id, 0.0)
+            )
+            scored.append((score, song_id))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        rankings.append([song_id for _, song_id in scored])
+    return rankings
+
+
+def random_candidate_rankings(prepared_cases: list[PreparedCase], seed: int) -> list[list[str]]:
+    rankings: list[list[str]] = []
+    for case in prepared_cases:
+        ordered = sorted(case.candidates)
+        rng = random.Random(f"{seed}:{case.playlist_id}:stage1")
+        rng.shuffle(ordered)
+        rankings.append(ordered)
+    return rankings
 
 
 def semantic_profile_values(profile: dict[str, object] | None, key: str) -> set[str]:
@@ -1600,6 +1765,9 @@ def prepare_cases(
     if mode == "hybrid":
         print_section("Preparing candidate scores with two-route Stage 1")
         print("  candidate source: item-CF route + content TF-IDF route + popularity backfill")
+    elif mode == "cf":
+        print_section("Preparing candidate scores with CF Stage 1")
+        print("  candidate source: item-CF route + popularity backfill")
     else:
         print_section(f"Preparing candidate scores with same-artist quota {int(force_ratio * 100)}%")
         print("  candidate source: same artist + CF + popularity")
@@ -1617,6 +1785,9 @@ def prepare_cases(
             content_scores = score_content_route(case.observed, content_index, exclude, pool_size, recent_window)
             content_ordered = ordered_scores(content_scores, popularity, exclude)
             candidates = merge_stage1_routes([cf_ordered, content_ordered], top_popular, pool_size, exclude)
+        elif mode == "cf":
+            cf_ordered = ordered_scores(cf_scores, popularity, exclude)
+            candidates = merge_stage1_routes([cf_ordered], top_popular, pool_size, exclude)
         else:
             baseline_ordered = ordered_cf_pop_candidates(cf_scores, top_popular, popularity, pool_size, exclude)
             forced_limit = max(0, min(pool_size, int(round(pool_size * force_ratio))))
@@ -1755,11 +1926,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--semantic-model", default="Qwen/Qwen2.5-1.5B-Instruct")
     parser.add_argument("--semantic-model-cache-dir", type=Path, default=DEFAULT_LLM_CACHE_DIR)
     parser.add_argument("--gemini-api-key-env", default="GEMINI_API_KEY", help="Environment variable containing your Google AI Studio API key")
+    parser.add_argument("--semantic-requests-per-minute", type=int, default=15, help="Throttle Gemini/API semantic requests; 15 means one request every 4 seconds")
     parser.add_argument("--semantic-device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--semantic-recent-songs", type=int, default=20)
     parser.add_argument("--semantic-lyrics-chars", type=int, default=240)
     parser.add_argument("--semantic-max-new-tokens", type=int, default=256)
     parser.add_argument("--semantic-max-generate", type=int, default=0, help="0 means generate/cache semantics for all eval playlists")
+    parser.add_argument("--lemon-stage2", action="store_true", help="Add LEMON-style emotion vectors as a Stage 2 ranking feature")
+    parser.add_argument("--lemon-weight", type=float, default=0.01)
+    parser.add_argument("--lemon-recent-window", type=int, default=8)
     parser.add_argument("--force-semantic-regenerate", action="store_true")
     parser.add_argument("--no-ablations", action="store_true")
     parser.add_argument("--show-example", action="store_true", help="Print one playlist example after metric tables")
@@ -1835,11 +2010,14 @@ def main() -> None:
     print(f"  stage1_mode:        {args.stage1_mode}")
     print(f"  semantics:          {args.playlist_semantics}")
     print(f"  song semantics:     {args.song_semantics if args.playlist_semantics != 'off' else 'off'}")
+    print(f"  LEMON Stage 2:      {args.lemon_stage2}")
     if args.playlist_semantics == "llm":
         print(f"  semantic provider:  {args.semantic_provider}")
         if args.semantic_provider == "gemini" and args.semantic_model.startswith("Qwen/"):
-            args.semantic_model = DEFAULT_GEMINI_MODEL
+            args.semantic_model = DEFAULT_GEMMA_MODEL
         print(f"  semantic model:     {args.semantic_model}")
+        if args.semantic_provider == "gemini":
+            print(f"  request throttle:   {args.semantic_requests_per_minute}/minute")
 
     playlist_semantics = build_playlist_semantics(
         cases=cases,
@@ -1855,13 +2033,27 @@ def main() -> None:
         lyrics_chars=args.semantic_lyrics_chars,
         max_new_tokens=args.semantic_max_new_tokens,
         max_generate=args.semantic_max_generate,
+        requests_per_minute=args.semantic_requests_per_minute,
         force_regenerate=args.force_semantic_regenerate,
     )
     song_semantics = build_song_semantics(
         songs=songs,
-        mode=args.song_semantics if (playlist_semantics or args.stage1_mode == "hybrid") else "off",
+        mode=args.song_semantics if (playlist_semantics or args.stage1_mode == "hybrid" or args.lemon_stage2) else "off",
         cache_path=args.song_semantic_cache,
     )
+    lemon_song_vectors: dict[str, dict[str, float]] = {}
+    lemon_user_vectors: dict[str, dict[str, float]] = {}
+    if args.lemon_stage2:
+        print_section("Building LEMON Stage 2 vectors")
+        lemon_song_vectors, lemon_user_vectors, lemon_alphas = build_lemon_feature_vectors(
+            cases,
+            song_semantics,
+            args.lemon_recent_window,
+        )
+        print(f"  LEMON song vectors: {sum(1 for vector in lemon_song_vectors.values() if vector):,}/{len(lemon_song_vectors):,}")
+        print(f"  LEMON user vectors: {sum(1 for vector in lemon_user_vectors.values() if vector):,}/{len(lemon_user_vectors):,}")
+        if lemon_alphas:
+            print(f"  alpha avg/min/max:  {sum(lemon_alphas) / len(lemon_alphas):.3f} / {min(lemon_alphas):.3f} / {max(lemon_alphas):.3f}")
     content_index = None
     if args.stage1_mode == "hybrid":
         print_section("Building content TF-IDF Stage 1 route")
@@ -1912,8 +2104,18 @@ def main() -> None:
     best_prepared_cases: list[PreparedCase] = []
     best_full_rankings: list[list[str]] = []
 
-    stage1_ratios = (STAGE1_RATIOS[0],) if args.stage1_mode == "hybrid" else STAGE1_RATIOS
-    for ratio in stage1_ratios:
+    if args.stage1_mode == "hybrid":
+        stage1_configs = [
+            ("CF Stage1", "cf", STAGE1_RATIOS[0]),
+            ("Hybrid Stage1", "hybrid", STAGE1_RATIOS[0]),
+        ]
+    else:
+        stage1_configs = [
+            (f"artist{int(ratio * 100)}%", "legacy", ratio)
+            for ratio in STAGE1_RATIOS
+        ]
+
+    for stage1_label, stage1_mode, ratio in stage1_configs:
         prepared_cases = prepare_cases(
             cases=cases,
             songs=songs,
@@ -1927,18 +2129,8 @@ def main() -> None:
             cold_start_threshold=args.cold_start_threshold,
             progress_interval=PROGRESS_INTERVAL,
             content_index=content_index,
-            mode=args.stage1_mode,
+            mode=stage1_mode,
         )
-        quota = int(ratio * 100)
-        stage1_label = "Hybrid Stage1" if args.stage1_mode == "hybrid" else f"artist{quota}%"
-        cf_pop = build_rankings(prepared_cases, args.cf_weight, 0.0, args.pop_weight)
-        rows.append((f"CF + {stage1_label} + popularity", *evaluate_rankings(cf_pop, cases, args.top_k)))
-        if playlist_semantics and ratio == STAGE1_RATIOS[0]:
-            semantic_only = build_rankings(prepared_cases, 0.0, 0.0, 0.0, 1.0)
-            semantic_pop = build_rankings(prepared_cases, 0.0, 0.0, args.pop_weight, 1.0)
-            semantic_label = "Playlist-song semantic" if song_semantics else "Playlist semantic"
-            rows.append((f"{semantic_label} only ({stage1_label} candidate pool)", *evaluate_rankings(semantic_only, cases, args.top_k)))
-            rows.append((f"{semantic_label} + popularity ({stage1_label} candidate pool)", *evaluate_rankings(semantic_pop, cases, args.top_k)))
 
         full_rankings = build_rankings(
             prepared_cases,
@@ -1947,7 +2139,61 @@ def main() -> None:
             args.pop_weight,
         )
         full_metrics = evaluate_rankings(full_rankings, cases, args.top_k)
-        rows.append((f"CF + {stage1_label} + artist score + popularity", *full_metrics))
+        if not args.no_ablations:
+            candidate_random = random_candidate_rankings(prepared_cases, args.seed)
+            rows.append((f"Random ordering inside {stage1_label} candidate pool", *evaluate_rankings(candidate_random, cases, args.top_k)))
+            cf_only = build_rankings(prepared_cases, args.cf_weight, 0.0, 0.0)
+            metadata_only = build_rankings(prepared_cases, 0.0, args.artist_weight, args.pop_weight)
+            rows.append((f"{stage1_label} x CF", *evaluate_rankings(cf_only, cases, args.top_k)))
+            rows.append((f"{stage1_label} x metadata", *evaluate_rankings(metadata_only, cases, args.top_k)))
+            rows.append((f"{stage1_label} x CF + metadata", *full_metrics))
+            if args.lemon_stage2:
+                lemon_only = build_rankings_with_lemon(
+                    prepared_cases,
+                    lemon_user_vectors,
+                    lemon_song_vectors,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                )
+                cf_lemon = build_rankings_with_lemon(
+                    prepared_cases,
+                    lemon_user_vectors,
+                    lemon_song_vectors,
+                    args.cf_weight,
+                    0.0,
+                    0.0,
+                    0.0,
+                    args.lemon_weight,
+                )
+                metadata_lemon = build_rankings_with_lemon(
+                    prepared_cases,
+                    lemon_user_vectors,
+                    lemon_song_vectors,
+                    0.0,
+                    args.artist_weight,
+                    args.pop_weight,
+                    0.0,
+                    args.lemon_weight,
+                )
+                cf_metadata_lemon = build_rankings_with_lemon(
+                    prepared_cases,
+                    lemon_user_vectors,
+                    lemon_song_vectors,
+                    args.cf_weight,
+                    args.artist_weight,
+                    args.pop_weight,
+                    0.0,
+                    args.lemon_weight,
+                )
+                rows.append((f"{stage1_label} x LEMON", *evaluate_rankings(lemon_only, cases, args.top_k)))
+                rows.append((f"{stage1_label} x CF + LEMON", *evaluate_rankings(cf_lemon, cases, args.top_k)))
+                rows.append((f"{stage1_label} x metadata + LEMON", *evaluate_rankings(metadata_lemon, cases, args.top_k)))
+                rows.append((f"{stage1_label} x CF + metadata + LEMON", *evaluate_rankings(cf_metadata_lemon, cases, args.top_k)))
+        else:
+            rows.append((f"CF + {stage1_label} + artist score + popularity", *full_metrics))
         if playlist_semantics:
             semantic_rankings = build_rankings(
                 prepared_cases,
@@ -1959,6 +2205,19 @@ def main() -> None:
             semantic_metrics = evaluate_rankings(semantic_rankings, cases, args.top_k)
             semantic_suffix = "playlist-song semantic" if song_semantics else "playlist semantic"
             rows.append((f"CF + {stage1_label} + artist score + popularity + {semantic_suffix}", *semantic_metrics))
+            if args.lemon_stage2 and args.no_ablations:
+                semantic_lemon_rankings = build_rankings_with_lemon(
+                    prepared_cases,
+                    lemon_user_vectors,
+                    lemon_song_vectors,
+                    args.cf_weight,
+                    args.artist_weight,
+                    args.pop_weight,
+                    args.semantic_weight,
+                    args.lemon_weight,
+                )
+                semantic_lemon_metrics = evaluate_rankings(semantic_lemon_rankings, cases, args.top_k)
+                rows.append((f"CF + {stage1_label} + metadata + {semantic_suffix} + LEMON", *semantic_lemon_metrics))
         else:
             semantic_rankings = full_rankings
             semantic_metrics = full_metrics
