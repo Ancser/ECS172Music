@@ -22,10 +22,13 @@ import os
 import random
 import re
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 
 ROOT = Path(__file__).resolve().parent
@@ -36,6 +39,7 @@ DEFAULT_FILTERED_PLAYLIST_CSV = DEFAULT_FILTERED_DIR / "spotify_playlist_50perce
 DEFAULT_SEMANTIC_CACHE = DEFAULT_FILTERED_DIR / "playlist_semantics.jsonl"
 DEFAULT_SONG_SEMANTIC_CACHE = DEFAULT_FILTERED_DIR / "song_semantics_fine_keywords.jsonl"
 DEFAULT_LLM_CACHE_DIR = ROOT / "models" / "llm_cache"
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite"
 STAGE1_RATIOS = (0.25, 0.50, 0.75, 1.00)
 STAGE1_POOL_SIZES = (100, 200, 300, 400, 500)
 STAGE2_POOL_SIZE = max(STAGE1_POOL_SIZES)
@@ -210,6 +214,13 @@ class PreparedCase:
     semantic_norm: dict[str, float]
     retrieval: float
     cold_start: bool
+
+
+@dataclass(frozen=True)
+class ContentIndex:
+    song_ids: list[str]
+    row_by_song: dict[str, int]
+    matrix: Any
 
 
 def print_section(title: str) -> None:
@@ -1012,6 +1023,73 @@ def generated_text_from_pipeline_output(output: object) -> str:
     return str(output)
 
 
+def semantic_response_schema() -> dict[str, object]:
+    properties: dict[str, object] = {}
+    for key in SEMANTIC_JSON_KEYS:
+        allowed = SEMANTIC_ALLOWED[key]
+        if key in SEMANTIC_LIST_KEYS:
+            properties[key] = {
+                "type": "array",
+                "items": {"type": "string", "enum": allowed},
+                "minItems": 1,
+                "maxItems": 3,
+            }
+        else:
+            properties[key] = {"type": "string", "enum": allowed}
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": SEMANTIC_JSON_KEYS,
+        "propertyOrdering": SEMANTIC_JSON_KEYS,
+    }
+
+
+def gemini_playlist_semantic(
+    case: EvalCase,
+    songs: dict[str, Song],
+    model_name: str,
+    api_key_env: str,
+    recent_songs: int,
+    lyrics_chars: int,
+    max_new_tokens: int,
+) -> dict[str, object]:
+    api_key = os.environ.get(api_key_env, "").strip()
+    if not api_key:
+        raise SystemExit(f"Missing Gemini API key. Set {api_key_env}=your_google_ai_studio_key.")
+    prompt = playlist_semantic_prompt(case, songs, recent_songs, lyrics_chars)
+    endpoint_model = urllib.parse.quote(model_name, safe="")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{endpoint_model}:generateContent?key={urllib.parse.quote(api_key)}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0,
+            "maxOutputTokens": max_new_tokens,
+            "responseMimeType": "application/json",
+            "responseSchema": semantic_response_schema(),
+        },
+    }
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1200]
+        raise SystemExit(f"Gemini API request failed with HTTP {exc.code}:\n{detail}") from exc
+    except urllib.error.URLError as exc:
+        raise SystemExit(f"Gemini API request failed: {exc}") from exc
+    parts = body.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+    text = "".join(str(part.get("text", "")) for part in parts if isinstance(part, dict))
+    parsed = extract_json_object(text)
+    if not parsed:
+        parsed = heuristic_playlist_semantic(case, songs)
+    return enrich_playlist_semantic(parsed, case, songs)
+
+
 def load_text_generation_pipeline(model_name: str, device: str, model_cache_dir: Path):
     try:
         import torch
@@ -1061,9 +1139,11 @@ def build_playlist_semantics(
     cases: list[EvalCase],
     songs: dict[str, Song],
     mode: str,
+    provider: str,
     cache_path: Path,
     model_name: str,
     model_cache_dir: Path,
+    api_key_env: str,
     device: str,
     recent_songs: int,
     lyrics_chars: int,
@@ -1075,6 +1155,7 @@ def build_playlist_semantics(
         return {}
     print_section("Preparing playlist semantics")
     print(f"  mode:          {mode}")
+    print(f"  provider:      {provider}")
     print(f"  cache:         {cache_path}")
     cache = {} if force_regenerate else load_semantic_cache(cache_path)
     pipe = None
@@ -1091,9 +1172,20 @@ def build_playlist_semantics(
             semantics[case.playlist_id] = heuristic_playlist_semantic(case, songs)
         else:
             if mode == "llm":
-                if pipe is None:
-                    pipe = load_text_generation_pipeline(model_name, device, model_cache_dir)
-                profile = llm_playlist_semantic(pipe, case, songs, recent_songs, lyrics_chars, max_new_tokens)
+                if provider == "gemini":
+                    profile = gemini_playlist_semantic(
+                        case,
+                        songs,
+                        model_name,
+                        api_key_env,
+                        recent_songs,
+                        lyrics_chars,
+                        max_new_tokens,
+                    )
+                else:
+                    if pipe is None:
+                        pipe = load_text_generation_pipeline(model_name, device, model_cache_dir)
+                    profile = llm_playlist_semantic(pipe, case, songs, recent_songs, lyrics_chars, max_new_tokens)
             else:
                 profile = heuristic_playlist_semantic(case, songs)
             semantics[case.playlist_id] = profile
@@ -1169,6 +1261,134 @@ def score_playlist_semantics(
                 score += 1.0
         scores[song_id] = score
     return scores
+
+
+def song_content_text(song: Song, profile: dict[str, object] | None, lyrics_chars: int) -> str:
+    lyrics = re.sub(r"\s+", " ", song.lyrics).strip()
+    if len(lyrics) > lyrics_chars:
+        lyrics = lyrics[:lyrics_chars].rsplit(" ", 1)[0]
+    semantic_bits: list[str] = []
+    if profile:
+        for key in SEMANTIC_JSON_KEYS:
+            values = profile.get(key)
+            values = values if isinstance(values, list) else [values]
+            for value in values:
+                text = str(value or "").replace("_", " ").strip()
+                if text and text != "mixed":
+                    semantic_bits.append(text)
+                    semantic_bits.append(f"{key} {text}")
+    return " ".join([song.title, song.artist, lyrics, " ".join(semantic_bits)])
+
+
+def build_content_index(
+    songs: dict[str, Song],
+    song_semantics: dict[str, dict[str, object]],
+    max_features: int,
+    lyrics_chars: int,
+) -> ContentIndex | None:
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.preprocessing import normalize
+    except Exception as exc:
+        print(f"  content route unavailable; install scikit-learn to enable TF-IDF retrieval: {exc}")
+        return None
+    song_ids = sorted(songs)
+    if not song_ids:
+        return None
+    texts = [song_content_text(songs[song_id], song_semantics.get(song_id), lyrics_chars) for song_id in song_ids]
+    vectorizer = TfidfVectorizer(
+        lowercase=True,
+        ngram_range=(1, 2),
+        max_features=max_features,
+        min_df=1,
+        token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z0-9_]+\b",
+    )
+    matrix = normalize(vectorizer.fit_transform(texts))
+    return ContentIndex(
+        song_ids=song_ids,
+        row_by_song={song_id: idx for idx, song_id in enumerate(song_ids)},
+        matrix=matrix,
+    )
+
+
+def score_content_route(
+    observed: list[str],
+    content_index: ContentIndex | None,
+    exclude: set[str],
+    top_k: int,
+    recent_window: int,
+) -> dict[str, float]:
+    if content_index is None:
+        return {}
+    row_weights: list[tuple[int, float]] = []
+    observed_window = observed[-recent_window:] if recent_window > 0 else observed
+    recent_set = set(observed_window)
+    for song_id in observed:
+        row_idx = content_index.row_by_song.get(song_id)
+        if row_idx is None:
+            continue
+        row_weights.append((row_idx, 2.0 if song_id in recent_set else 1.0))
+    if not row_weights:
+        return {}
+    profile = None
+    total_weight = 0.0
+    for row_idx, weight in row_weights:
+        row = content_index.matrix[row_idx] * weight
+        profile = row if profile is None else profile + row
+        total_weight += weight
+    if profile is None or total_weight <= 0:
+        return {}
+    profile = profile / total_weight
+    raw_scores = content_index.matrix @ profile.T
+    scores_array = raw_scores.toarray().ravel() if hasattr(raw_scores, "toarray") else raw_scores.ravel()
+    scored = [
+        (float(score), song_id)
+        for song_id, score in zip(content_index.song_ids, scores_array)
+        if song_id not in exclude and float(score) > 0.0
+    ]
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return {song_id: score for score, song_id in scored[:top_k]}
+
+
+def ordered_scores(
+    scores: dict[str, float],
+    popularity: Counter[str],
+    exclude: set[str],
+) -> list[str]:
+    return [
+        song_id
+        for song_id, _ in sorted(scores.items(), key=lambda item: (-item[1], -popularity.get(item[0], 0), item[0]))
+        if song_id not in exclude
+    ]
+
+
+def merge_stage1_routes(
+    routes: list[list[str]],
+    top_popular: list[str],
+    pool_size: int,
+    exclude: set[str],
+) -> set[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    max_route_len = max((len(route) for route in routes), default=0)
+    for idx in range(max_route_len):
+        for route in routes:
+            if idx >= len(route):
+                continue
+            song_id = route[idx]
+            if song_id in exclude or song_id in seen:
+                continue
+            ordered.append(song_id)
+            seen.add(song_id)
+            if len(ordered) >= pool_size:
+                return set(ordered)
+    for song_id in top_popular:
+        if song_id not in exclude and song_id not in seen:
+            ordered.append(song_id)
+            seen.add(song_id)
+        if len(ordered) >= pool_size:
+            break
+    return set(ordered)
 
 
 def semantic_profile_values(profile: dict[str, object] | None, key: str) -> set[str]:
@@ -1295,13 +1515,16 @@ def print_stage1_same_artist_grid(
     cf_neighbors: dict[str, list[tuple[str, float]]],
     popularity: Counter[str],
     recent_window: int,
+    content_index: ContentIndex | None = None,
+    mode: str = "legacy",
 ) -> None:
-    print_section("Stage 1 same-artist candidate recall")
+    print_section("Stage 1 candidate recall")
     pool_sizes = list(STAGE1_POOL_SIZES)
     max_pool = max(pool_sizes)
     top_popular = [song_id for song_id, _ in popularity.most_common(max_pool)]
     ratio_methods = [f"CF + artist{int(ratio * 100)}% + popularity" for ratio in STAGE1_RATIOS]
-    method_names = ratio_methods + ["Popularity", "CF"]
+    hybrid_methods = ["Route A: Item-CF", "Route B: Content TF-IDF", "Hybrid CF + content + popularity"]
+    method_names = (hybrid_methods if mode == "hybrid" else ratio_methods) + ["Popularity", "CF"]
     recalls_by_method: dict[str, dict[int, list[float]]] = {
         method: {pool_size: [] for pool_size in pool_sizes}
         for method in method_names
@@ -1317,18 +1540,31 @@ def print_stage1_same_artist_grid(
             for song_id, _ in sorted(cf_scores.items(), key=lambda item: (-item[1], -popularity.get(item[0], 0), item[0]))
             if song_id not in exclude
         ]
+        content_scores = score_content_route(case.observed, content_index, exclude, max_pool, recent_window)
+        content_ordered = ordered_scores(content_scores, popularity, exclude)
         for pool_size in pool_sizes:
             truth = set(case.heldout)
-            for ratio, method_name in zip(STAGE1_RATIOS, ratio_methods):
-                forced_limit = max(0, min(pool_size, int(round(pool_size * ratio))))
-                forced = same_artist_candidates(case.observed, songs, popularity, forced_limit, recent_window, exclude)
-                candidates = merge_forced_stage1_candidates(forced, baseline_ordered[:pool_size], pool_size)
-                recalls_by_method[method_name][pool_size].append(
-                    recall_at_k(list(candidates), truth, len(candidates))
+            if mode == "hybrid":
+                hybrid_candidates = merge_stage1_routes(
+                    [cf_ordered[:pool_size], content_ordered[:pool_size]],
+                    top_popular,
+                    pool_size,
+                    exclude,
                 )
-            recalls_by_method["Popularity"][pool_size].append(
-                recall_at_k(popularity_ordered[:pool_size], truth, pool_size)
-            )
+                recalls_by_method["Route A: Item-CF"][pool_size].append(recall_at_k(cf_ordered[:pool_size], truth, pool_size))
+                recalls_by_method["Route B: Content TF-IDF"][pool_size].append(recall_at_k(content_ordered[:pool_size], truth, pool_size))
+                recalls_by_method["Hybrid CF + content + popularity"][pool_size].append(
+                    recall_at_k(list(hybrid_candidates), truth, len(hybrid_candidates))
+                )
+            else:
+                for ratio, method_name in zip(STAGE1_RATIOS, ratio_methods):
+                    forced_limit = max(0, min(pool_size, int(round(pool_size * ratio))))
+                    forced = same_artist_candidates(case.observed, songs, popularity, forced_limit, recent_window, exclude)
+                    candidates = merge_forced_stage1_candidates(forced, baseline_ordered[:pool_size], pool_size)
+                    recalls_by_method[method_name][pool_size].append(
+                        recall_at_k(list(candidates), truth, len(candidates))
+                    )
+            recalls_by_method["Popularity"][pool_size].append(recall_at_k(popularity_ordered[:pool_size], truth, pool_size))
             recalls_by_method["CF"][pool_size].append(
                 recall_at_k(cf_ordered[:pool_size], truth, pool_size)
             )
@@ -1358,9 +1594,15 @@ def prepare_cases(
     recent_window: int,
     cold_start_threshold: int,
     progress_interval: int,
+    content_index: ContentIndex | None = None,
+    mode: str = "legacy",
 ) -> list[PreparedCase]:
-    print_section(f"Preparing candidate scores with same-artist quota {int(force_ratio * 100)}%")
-    print("  candidate source: same artist + CF + popularity")
+    if mode == "hybrid":
+        print_section("Preparing candidate scores with two-route Stage 1")
+        print("  candidate source: item-CF route + content TF-IDF route + popularity backfill")
+    else:
+        print_section(f"Preparing candidate scores with same-artist quota {int(force_ratio * 100)}%")
+        print("  candidate source: same artist + CF + popularity")
     top_popular = [song_id for song_id, _ in popularity.most_common(pool_size)]
     prepared: list[PreparedCase] = []
     cold = 0
@@ -1370,10 +1612,16 @@ def prepare_cases(
     for idx, case in enumerate(cases, start=1):
         exclude = set(case.observed)
         cf_scores = score_cf(case.observed, cf_neighbors, exclude, pool_size)
-        baseline_ordered = ordered_cf_pop_candidates(cf_scores, top_popular, popularity, pool_size, exclude)
-        forced_limit = max(0, min(pool_size, int(round(pool_size * force_ratio))))
-        forced = same_artist_candidates(case.observed, songs, popularity, forced_limit, recent_window, exclude)
-        candidates = merge_forced_stage1_candidates(forced, baseline_ordered, pool_size)
+        if mode == "hybrid":
+            cf_ordered = ordered_scores(cf_scores, popularity, exclude)
+            content_scores = score_content_route(case.observed, content_index, exclude, pool_size, recent_window)
+            content_ordered = ordered_scores(content_scores, popularity, exclude)
+            candidates = merge_stage1_routes([cf_ordered, content_ordered], top_popular, pool_size, exclude)
+        else:
+            baseline_ordered = ordered_cf_pop_candidates(cf_scores, top_popular, popularity, pool_size, exclude)
+            forced_limit = max(0, min(pool_size, int(round(pool_size * force_ratio))))
+            forced = same_artist_candidates(case.observed, songs, popularity, forced_limit, recent_window, exclude)
+            candidates = merge_forced_stage1_candidates(forced, baseline_ordered, pool_size)
         is_cold = len(case.observed) <= cold_start_threshold or not cf_scores
         if is_cold:
             cold += 1
@@ -1496,12 +1744,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artist-weight", type=float, default=0.10)
     parser.add_argument("--pop-weight", type=float, default=0.10)
     parser.add_argument("--semantic-weight", type=float, default=0.01)
+    parser.add_argument("--stage1-mode", choices=["legacy", "hybrid"], default="legacy", help="legacy uses same-artist + CF; hybrid merges CF and content TF-IDF routes")
+    parser.add_argument("--content-max-features", type=int, default=6000)
+    parser.add_argument("--content-lyrics-chars", type=int, default=500)
     parser.add_argument("--playlist-semantics", choices=["off", "heuristic", "llm"], default="off")
+    parser.add_argument("--semantic-provider", choices=["local", "gemini"], default="local", help="Provider used when --playlist-semantics llm")
     parser.add_argument("--semantic-cache", type=Path, default=DEFAULT_SEMANTIC_CACHE)
     parser.add_argument("--song-semantics", choices=["off", "heuristic"], default="heuristic")
     parser.add_argument("--song-semantic-cache", type=Path, default=DEFAULT_SONG_SEMANTIC_CACHE)
     parser.add_argument("--semantic-model", default="Qwen/Qwen2.5-1.5B-Instruct")
     parser.add_argument("--semantic-model-cache-dir", type=Path, default=DEFAULT_LLM_CACHE_DIR)
+    parser.add_argument("--gemini-api-key-env", default="GEMINI_API_KEY", help="Environment variable containing your Google AI Studio API key")
     parser.add_argument("--semantic-device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--semantic-recent-songs", type=int, default=20)
     parser.add_argument("--semantic-lyrics-chars", type=int, default=240)
@@ -1579,16 +1832,24 @@ def main() -> None:
     print(f"  heldout per list:   {args.holdout_k}")
     print(f"  candidate pools:    {', '.join(str(pool) for pool in STAGE1_POOL_SIZES)}")
     print(f"  ranking pool:       {STAGE2_POOL_SIZE}")
+    print(f"  stage1_mode:        {args.stage1_mode}")
     print(f"  semantics:          {args.playlist_semantics}")
     print(f"  song semantics:     {args.song_semantics if args.playlist_semantics != 'off' else 'off'}")
+    if args.playlist_semantics == "llm":
+        print(f"  semantic provider:  {args.semantic_provider}")
+        if args.semantic_provider == "gemini" and args.semantic_model.startswith("Qwen/"):
+            args.semantic_model = DEFAULT_GEMINI_MODEL
+        print(f"  semantic model:     {args.semantic_model}")
 
     playlist_semantics = build_playlist_semantics(
         cases=cases,
         songs=songs,
         mode=args.playlist_semantics,
+        provider=args.semantic_provider,
         cache_path=args.semantic_cache,
         model_name=args.semantic_model,
         model_cache_dir=args.semantic_model_cache_dir,
+        api_key_env=args.gemini_api_key_env,
         device=args.semantic_device,
         recent_songs=args.semantic_recent_songs,
         lyrics_chars=args.semantic_lyrics_chars,
@@ -1598,9 +1859,21 @@ def main() -> None:
     )
     song_semantics = build_song_semantics(
         songs=songs,
-        mode=args.song_semantics if playlist_semantics else "off",
+        mode=args.song_semantics if (playlist_semantics or args.stage1_mode == "hybrid") else "off",
         cache_path=args.song_semantic_cache,
     )
+    content_index = None
+    if args.stage1_mode == "hybrid":
+        print_section("Building content TF-IDF Stage 1 route")
+        content_index = build_content_index(
+            songs=songs,
+            song_semantics=song_semantics,
+            max_features=args.content_max_features,
+            lyrics_chars=args.content_lyrics_chars,
+        )
+        if content_index is not None:
+            print(f"  route B songs:       {len(content_index.song_ids):,}")
+            print(f"  route B features:    {content_index.matrix.shape[1]:,}")
 
     print_section("Building co-occurrence CF neighbors")
     cf_neighbors = build_cf_neighbors(cases, args.cf_neighbors)
@@ -1614,6 +1887,8 @@ def main() -> None:
         cf_neighbors=cf_neighbors,
         popularity=popularity,
         recent_window=args.stage1_recent_window,
+        content_index=content_index,
+        mode=args.stage1_mode,
     )
 
     random_rankings: list[list[str]] = []
@@ -1637,7 +1912,8 @@ def main() -> None:
     best_prepared_cases: list[PreparedCase] = []
     best_full_rankings: list[list[str]] = []
 
-    for ratio in STAGE1_RATIOS:
+    stage1_ratios = (STAGE1_RATIOS[0],) if args.stage1_mode == "hybrid" else STAGE1_RATIOS
+    for ratio in stage1_ratios:
         prepared_cases = prepare_cases(
             cases=cases,
             songs=songs,
@@ -1650,16 +1926,19 @@ def main() -> None:
             recent_window=args.stage1_recent_window,
             cold_start_threshold=args.cold_start_threshold,
             progress_interval=PROGRESS_INTERVAL,
+            content_index=content_index,
+            mode=args.stage1_mode,
         )
         quota = int(ratio * 100)
+        stage1_label = "Hybrid Stage1" if args.stage1_mode == "hybrid" else f"artist{quota}%"
         cf_pop = build_rankings(prepared_cases, args.cf_weight, 0.0, args.pop_weight)
-        rows.append((f"CF + artist{quota}% + popularity", *evaluate_rankings(cf_pop, cases, args.top_k)))
+        rows.append((f"CF + {stage1_label} + popularity", *evaluate_rankings(cf_pop, cases, args.top_k)))
         if playlist_semantics and ratio == STAGE1_RATIOS[0]:
             semantic_only = build_rankings(prepared_cases, 0.0, 0.0, 0.0, 1.0)
             semantic_pop = build_rankings(prepared_cases, 0.0, 0.0, args.pop_weight, 1.0)
             semantic_label = "Playlist-song semantic" if song_semantics else "Playlist semantic"
-            rows.append((f"{semantic_label} only (artist{quota}% candidate pool)", *evaluate_rankings(semantic_only, cases, args.top_k)))
-            rows.append((f"{semantic_label} + popularity (artist{quota}% candidate pool)", *evaluate_rankings(semantic_pop, cases, args.top_k)))
+            rows.append((f"{semantic_label} only ({stage1_label} candidate pool)", *evaluate_rankings(semantic_only, cases, args.top_k)))
+            rows.append((f"{semantic_label} + popularity ({stage1_label} candidate pool)", *evaluate_rankings(semantic_pop, cases, args.top_k)))
 
         full_rankings = build_rankings(
             prepared_cases,
@@ -1668,7 +1947,7 @@ def main() -> None:
             args.pop_weight,
         )
         full_metrics = evaluate_rankings(full_rankings, cases, args.top_k)
-        rows.append((f"CF + artist{quota}% + artist score + popularity", *full_metrics))
+        rows.append((f"CF + {stage1_label} + artist score + popularity", *full_metrics))
         if playlist_semantics:
             semantic_rankings = build_rankings(
                 prepared_cases,
@@ -1679,7 +1958,7 @@ def main() -> None:
             )
             semantic_metrics = evaluate_rankings(semantic_rankings, cases, args.top_k)
             semantic_suffix = "playlist-song semantic" if song_semantics else "playlist semantic"
-            rows.append((f"CF + artist{quota}% + artist score + popularity + {semantic_suffix}", *semantic_metrics))
+            rows.append((f"CF + {stage1_label} + artist score + popularity + {semantic_suffix}", *semantic_metrics))
         else:
             semantic_rankings = full_rankings
             semantic_metrics = full_metrics
